@@ -237,6 +237,24 @@ Thiết kế được verify: local git merge thay PR (gitops.Merger), marker
   session count của project giữ nguyên (không spawn trùng). Resume → marker ok
   → merge 712d248 → done.
 
+### Bug stale lock phát hiện & fix trong lần 3 (commit cdcb947)
+- **Bug**: `om run` bị kill -9 để lại `run_lock_pid` trong SQLite; run mới bị
+  từ chối "locked by another om run (pid N)" dù pid N đã chết — resume bị chặn
+  đến hết cửa sổ LockStaleAfter (60s). Với kill ngay sau heartbeat, đây là chờ
+  vô ích; và người dùng không phân biệt được "đang chạy thật" với "xác chết".
+- **Fix**: `AcquireRunLock` kiểm tra holder còn sống (`kill(pid,0)`, EPERM =
+  sống) khi UPDATE thường không ăn; nếu holder chết → CAS đúng pid holder để
+  steal (2 kẻ steal đồng thời chỉ 1 thắng), trả `tookOver=true` → scheduler
+  log "previous om run holder is dead — taking over its run lock".
+- Unit test: `TestRunLockDeadHolder` (pid sống → từ chối, pid chết → tiếp quản
+  + holder mới ghi đúng), `TestRunLock`/`TestRunLockContention` cập nhật theo
+  ngữ nghĩa mới. go vet + go test ./... -race sạch.
+- **Verify live** (plan p-8b0b3406, cùng repo): run 1 (pid 52997) dispatch t1
+  → kill -9 → run 2 CHẠY NGAY (không chờ 60s), log takeover, **adopt** session
+  om-e2e-1784571147-6 (events: 2 run_started, chỉ 1 task_dispatched; session
+  count của project 6 = không spawn trùng) → marker ok → merge 4a77fb3 →
+  `git show main:lock-test2.txt` = `lock-ok-2`. PASS.
+
 ### Phát hiện quan trọng lần 3
 1. **Trust-folder dialog là needs_input mới**: chính `.claude/settings.json`
    (giải pháp autonomy) lại sinh ra dialog "do you trust this folder" ở lần
