@@ -156,14 +156,14 @@ func TestGetReadyTasksProgression(t *testing.T) {
 		t.Fatalf("dispatched task must not be ready, got %v", taskIDs(ready))
 	}
 	must(s.StartTask("p1", "a", "run-1"))
-	must(s.FinishTask("p1", "a", "run-1", "https://github.com/x/pr/1"))
+	must(s.FinishTask("p1", "a", "run-1", "https://github.com/x/pr/1", `{"marker":"ok","summary":"did a"}`))
 
 	ready, _ = s.GetReadyTasks("p1")
 	if got := strings.Join(taskIDs(ready), ","); got != "b,c" {
 		t.Fatalf("want ready=b,c, got %q", got)
 	}
 	must(s.DispatchTask("p1", "b", "run-1", "sess-b", "ao/sess-b/root"))
-	must(s.FinishTask("p1", "b", "run-1", ""))
+	must(s.FinishTask("p1", "b", "run-1", "", ""))
 	if ready, _ = s.GetReadyTasks("p1"); len(ready) != 1 || ready[0].ID != "c" {
 		t.Fatalf("want ready=c, got %v", taskIDs(ready))
 	}
@@ -181,7 +181,7 @@ func TestInvalidTransitionsRejected(t *testing.T) {
 	if err := s.StartRun("p1", "run-1"); err == nil {
 		t.Fatal("run on draft plan should fail")
 	}
-	if err := s.FinishTask("p1", "a", "run-1", ""); err == nil {
+	if err := s.FinishTask("p1", "a", "run-1", "", ""); err == nil {
 		t.Fatal("finishing a pending task should fail")
 	}
 	if err := s.ApprovePlan("p1"); err != nil {
@@ -189,6 +189,51 @@ func TestInvalidTransitionsRejected(t *testing.T) {
 	}
 	if err := s.ApprovePlan("p1"); err == nil {
 		t.Fatal("double approve should fail")
+	}
+}
+
+// TestFinishTaskPayload: the task_done payload (marker summary) must
+// persist into brain_events, and the merge audit events must be listable
+// without breaking derived state.
+func TestFinishTaskPayload(t *testing.T) {
+	s := openTestStore(t)
+	mustCreatePlan(t, s, "p1", nt("a"))
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.ApprovePlan("p1"))
+	must(s.StartRun("p1", "run-1"))
+	must(s.DispatchTask("p1", "a", "run-1", "sess-a", "ao/sess-a/root"))
+	must(s.RecordMergeBlocked("p1", "a", "run-1", `{"branch":"ao/sess-a/root","reason":"dirty"}`))
+	must(s.RecordTaskBranchMerged("p1", "a", "run-1", `{"branch":"ao/sess-a/root","sha":"abc"}`))
+	must(s.FinishTask("p1", "a", "run-1", "", `{"marker":"ok","summary":"did it"}`))
+	events, err := s.ListEvents("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done, merged, blocked string
+	for _, e := range events {
+		switch e.Type {
+		case EventTaskDone:
+			done = e.PayloadJSON
+		case EventTaskBranchMerged:
+			merged = e.PayloadJSON
+		case EventMergeBlocked:
+			blocked = e.PayloadJSON
+		}
+	}
+	if !strings.Contains(done, `"summary":"did it"`) {
+		t.Fatalf("task_done payload not persisted: %q", done)
+	}
+	if !strings.Contains(merged, `"sha":"abc"`) || !strings.Contains(blocked, `"reason":"dirty"`) {
+		t.Fatalf("audit payloads wrong: merged=%q blocked=%q", merged, blocked)
+	}
+	st := assertDeriveMatchesCache(t, s, "p1")
+	if st.TaskStatus["a"] != TaskDone {
+		t.Fatalf("audit events must not change derived state, got %q", st.TaskStatus["a"])
 	}
 }
 

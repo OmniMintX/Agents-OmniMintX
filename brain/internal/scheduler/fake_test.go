@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,15 +14,22 @@ import (
 // sessStep is one scripted observation of a fake session: on each GetSession
 // call the next step is applied; the last step persists.
 type sessStep struct {
-	status aoclient.SessionStatus
-	marker bool // .om-done exists in the workspace
-	pr     int  // attach an open PR with this number (0 = none)
+	status    aoclient.SessionStatus
+	marker    string // content of the per-task .om-done.<hex8> file
+	hasMarker bool   // marker file exists in the worktree
+	pr        int    // attach an open PR with this number (0 = none)
+}
+
+// stepMarker builds a step where the marker file exists with content.
+func stepMarker(status aoclient.SessionStatus, content string) sessStep {
+	return sessStep{status: status, marker: content, hasMarker: true}
 }
 
 type fakeSession struct {
-	sess   aoclient.Session
-	files  []aoclient.WorkspaceFile
-	script []sessStep
+	sess      aoclient.Session
+	marker    string // current marker content
+	hasMarker bool
+	script    []sessStep
 }
 
 // fakeAO is an in-memory AO daemon. `failGets` makes the next N GetSession
@@ -32,22 +40,26 @@ type fakeAO struct {
 	nextID    int
 	sessions  map[string]*fakeSession
 	scripts   map[string][]sessStep // displayName -> script for new sessions
-	log       []string              // "create:om-x", "merge:1", "kill:sess-1"
+	log       []string              // "create:om-x", "merge:<branch>", "kill:sess-1"
 	active    int
 	maxActive int
 	failGets  int
 	onCreate  func(f *fakeAO, in aoclient.SpawnSessionRequest)
-	// wsFilesRouteMissing mimics AO 0.10.x: the workspace/files listing
-	// route answers 404 ROUTE_NOT_FOUND (per-file preview still works).
-	wsFilesRouteMissing bool
+	prompts   map[string]string // displayName -> prompt sent to CreateSession
 }
 
 func newFakeAO() *fakeAO {
-	return &fakeAO{sessions: map[string]*fakeSession{}, scripts: map[string][]sessStep{}}
+	return &fakeAO{sessions: map[string]*fakeSession{}, scripts: map[string][]sessStep{}, prompts: map[string]string{}}
 }
 
 func (f *fakeAO) downErr() error {
 	return fmt.Errorf("%w: fake daemon down", aoclient.ErrDaemonNotRunning)
+}
+
+func (f *fakeAO) appendLog(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log = append(f.log, e)
 }
 
 // addSession pre-seeds a session (crash-resume tests). Returns its id.
@@ -87,6 +99,7 @@ func (f *fakeAO) CreateSession(_ context.Context, in aoclient.SpawnSessionReques
 		script: f.scripts[in.DisplayName],
 	}
 	f.sessions[id] = fs
+	f.prompts[in.DisplayName] = in.Prompt
 	f.log = append(f.log, "create:"+in.DisplayName)
 	f.active++
 	if f.active > f.maxActive {
@@ -112,8 +125,8 @@ func (f *fakeAO) GetSession(_ context.Context, sessionID string) (aoclient.Sessi
 			fs.script = fs.script[1:]
 		}
 		fs.sess.Status = step.status
-		if step.marker {
-			fs.files = []aoclient.WorkspaceFile{{Path: DoneMarker, Status: "added", Size: 1}}
+		if step.hasMarker {
+			fs.marker, fs.hasMarker = step.marker, true
 		}
 		if step.pr != 0 && !fs.hasPR(step.pr) {
 			fs.sess.PRs = append(fs.sess.PRs, aoclient.SessionPRFacts{
@@ -160,38 +173,18 @@ func (f *fakeAO) KillSession(_ context.Context, sessionID string) (aoclient.Kill
 	return aoclient.KillSessionResult{OK: true, SessionID: sessionID}, nil
 }
 
-func (f *fakeAO) MergePR(_ context.Context, prID string) (aoclient.MergePRResult, error) {
+func (f *fakeAO) ListProjects(_ context.Context) ([]aoclient.ProjectSummary, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	n, err := strconv.Atoi(prID)
-	if err != nil {
-		return aoclient.MergePRResult{}, err
+	if f.failGets > 0 {
+		f.failGets--
+		return nil, f.downErr()
 	}
-	for _, fs := range f.sessions {
-		for i := range fs.sess.PRs {
-			if fs.sess.PRs[i].Number == n {
-				fs.sess.PRs[i].State = "merged"
-				f.log = append(f.log, "merge:"+prID)
-				return aoclient.MergePRResult{OK: true, PRNumber: n, Method: "squash"}, nil
-			}
-		}
-	}
-	return aoclient.MergePRResult{}, &aoclient.APIError{HTTPStatus: 404, Kind: "not_found", Code: "PR_NOT_FOUND", Message: prID}
+	return []aoclient.ProjectSummary{{ID: "proj-1", Name: "proj-1", Path: "/fake/repo"}}, nil
 }
 
-func (f *fakeAO) ListWorkspaceFiles(_ context.Context, sessionID string) (aoclient.WorkspaceFiles, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.wsFilesRouteMissing {
-		return aoclient.WorkspaceFiles{}, &aoclient.APIError{HTTPStatus: 404, Kind: "not_found", Code: "ROUTE_NOT_FOUND", Message: "GET /api/v1/sessions/" + sessionID + "/workspace/files has no handler"}
-	}
-	fs, ok := f.sessions[sessionID]
-	if !ok {
-		return aoclient.WorkspaceFiles{}, &aoclient.APIError{HTTPStatus: 404, Kind: "not_found", Code: "SESSION_NOT_FOUND", Message: sessionID}
-	}
-	return aoclient.WorkspaceFiles{SessionID: sessionID, Files: fs.files}, nil
-}
-
+// PreviewFile serves ONLY the session's per-task marker file, mirroring the
+// real AO preview route the scheduler probes.
 func (f *fakeAO) PreviewFile(_ context.Context, sessionID, filePath string) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -199,10 +192,8 @@ func (f *fakeAO) PreviewFile(_ context.Context, sessionID, filePath string) (str
 	if !ok {
 		return "", false, nil
 	}
-	for _, fl := range fs.files {
-		if fl.Path == filePath && fl.Status != "deleted" {
-			return "marker", true, nil
-		}
+	if fs.hasMarker && strings.HasPrefix(filePath, DoneMarkerPrefix) {
+		return fs.marker, true, nil
 	}
 	return "", false, nil
 }

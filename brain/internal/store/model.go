@@ -45,6 +45,10 @@ const (
 	EventTaskDone        = "task_done"
 	EventTaskFailed      = "task_failed"
 	EventAOUnreachable   = "ao_unreachable" // informational; no state change
+	// Local-merge audit events (informational; git ancestry is the source
+	// of truth for merged-ness, these only record what the scheduler did).
+	EventTaskBranchMerged = "task_branch_merged" // {branch, sha}
+	EventMergeBlocked     = "merge_blocked"      // {branch, reason}
 )
 
 // Plan is a stored plan row.

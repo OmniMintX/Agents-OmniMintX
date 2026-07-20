@@ -66,7 +66,7 @@ func TestNeedsHumanIsNotFailure(t *testing.T) {
 	// is also allowed (session may finish while escalated).
 	must(s.ResumeTask("p1", "a", "run-1"))
 	must(s.MarkTaskNeedsHuman("p1", "a", "run-1", "{}"))
-	must(s.FinishTask("p1", "a", "run-1", "https://pr/1"))
+	must(s.FinishTask("p1", "a", "run-1", "https://pr/1", ""))
 	st = assertDeriveMatchesCache(t, s, "p1")
 	if st.TaskStatus["a"] != TaskDone {
 		t.Fatalf("task a = %q, want done", st.TaskStatus["a"])

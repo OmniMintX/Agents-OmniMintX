@@ -18,7 +18,7 @@ func TestRunAODownMidRun(t *testing.T) {
 	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
 		{status: aoclient.StatusWorking},
 		{status: aoclient.StatusWorking},
-		{status: aoclient.StatusIdle, marker: true},
+		stepMarker(aoclient.StatusIdle, "ok: done"),
 	}
 	created := false
 	ao.onCreate = func(f *fakeAO, _ aoclient.SpawnSessionRequest) {
@@ -51,11 +51,12 @@ func TestRunAODownMidRun(t *testing.T) {
 	}
 }
 
-// TestRunIdleNoMarkerTimeout: a session that sits idle WITHOUT the .om-done
-// marker beyond TaskTimeout must be killed and its task failed.
+// TestRunIdleNoMarkerTimeout: a session that sits idle WITHOUT its
+// per-task marker beyond IdleNoMarkerTimeout must be killed and its task
+// failed with kind=marker_missing naming the expected marker path.
 func TestRunIdleNoMarkerTimeout(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")},
-		Config{TaskTimeout: time.Minute, PollInterval: 15 * time.Second})
+		Config{IdleNoMarkerTimeout: time.Minute, PollInterval: 15 * time.Second})
 	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
 		{status: aoclient.StatusIdle}, // idle forever, no marker
 	}
@@ -81,14 +82,46 @@ func TestRunIdleNoMarkerTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
+	marker := markerPathFor("plan-1", "a1234567")
 	found := false
 	for _, e := range events {
-		if e.Type == store.EventTaskFailed && strings.Contains(e.PayloadJSON, DoneMarker) {
+		if e.Type == store.EventTaskFailed &&
+			strings.Contains(e.PayloadJSON, marker) &&
+			strings.Contains(e.PayloadJSON, `"kind":"marker_missing"`) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("task_failed payload should name the missing %s marker", DoneMarker)
+		t.Fatalf("task_failed payload should carry kind=marker_missing and the %s path", marker)
+	}
+}
+
+// TestRunTerminatedNoMarker: a session that terminates without its marker
+// fails immediately with kind=marker_missing.
+func TestRunTerminatedNoMarker(t *testing.T) {
+	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
+		{status: aoclient.StatusWorking},
+		{status: aoclient.StatusTerminated},
+	}
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskFailed {
+		t.Fatalf("task status = %s, want failed", got)
+	}
+	events, err := st.ListEvents("plan-1")
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == store.EventTaskFailed && strings.Contains(e.PayloadJSON, `"kind":"marker_missing"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("want task_failed kind=marker_missing for terminated-without-marker")
 	}
 }
 

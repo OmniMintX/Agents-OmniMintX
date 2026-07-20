@@ -59,7 +59,7 @@ func TestCrashMidTransaction(t *testing.T) {
 		}
 	}
 	// The interrupted transition can be replayed cleanly after resume.
-	if err := s2.FinishTask("p1", "b", "run-1", ""); err != nil {
+	if err := s2.FinishTask("p1", "b", "run-1", "", ""); err != nil {
 		t.Fatalf("replay finish after crash: %v", err)
 	}
 	final := assertDeriveMatchesCache(t, s2, "p1")

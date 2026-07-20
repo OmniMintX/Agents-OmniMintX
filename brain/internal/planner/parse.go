@@ -58,9 +58,10 @@ func Parse(data []byte, allowedHarnesses []string) (*Plan, error) {
 }
 
 // validate enforces: >=1 task, unique non-empty titles, harness from the
-// allowed list, prompt non-empty / <= MaxPromptChars / contains DoneMarker,
-// depends_on resolvable with AT MOST ONE parent (chain/fan-out only, no
-// diamond), and no cycles.
+// allowed list, prompt non-empty / <= MaxPromptChars, depends_on
+// resolvable with AT MOST ONE parent (chain/fan-out only, no diamond),
+// and no cycles. The completion-marker protocol is appended by the
+// scheduler at dispatch, so it is deliberately NOT validated here.
 func validate(pj planJSON, allowedHarnesses []string) error {
 	if len(pj.Tasks) == 0 {
 		return fmt.Errorf("plan must contain at least one task")
@@ -91,10 +92,6 @@ func validate(pj planJSON, allowedHarnesses []string) error {
 		if len(t.Prompt) > MaxPromptChars {
 			return fmt.Errorf("task %q: prompt is %d chars, exceeding the %d limit",
 				t.Title, len(t.Prompt), MaxPromptChars)
-		}
-		if !strings.Contains(t.Prompt, DoneMarker) {
-			return fmt.Errorf("task %q: prompt must instruct the agent to create the %s marker file at the repo root as its last action",
-				t.Title, DoneMarker)
 		}
 		if len(t.DependsOn) > 1 {
 			return fmt.Errorf("task %q has %d parents; at most 1 is allowed (chain or fan-out only, no diamond dependencies in phase 1)",

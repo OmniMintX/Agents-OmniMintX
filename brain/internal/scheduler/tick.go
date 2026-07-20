@@ -2,12 +2,16 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
 	"github.com/OmniMintX/overmind/internal/store"
 )
+
+// errSkipDispatch is an internal signal from ensureParentsMerged: the
+// parent merge is transiently blocked, skip this child this tick.
+var errSkipDispatch = errors.New("skip dispatch this tick")
 
 // tick is one scheduler pass: reconcile crashed dispatches, poll active
 // sessions, then dispatch ready tasks. Transport errors (AO unreachable)
@@ -70,8 +74,10 @@ func (r *runner) reconcileDispatching(ctx context.Context, t store.Task) error {
 }
 
 // dispatchReady starts ready tasks (pending + all deps done) while the
-// active count stays under MaxParallel, merging parent PRs first
-// (merge-before-dispatch: children must see parent code in the base branch).
+// active count stays under MaxParallel, re-checking that every parent's
+// branch is in the default branch first (parents are merged locally when
+// they finish; this ancestry re-check covers crashes between merge and
+// finish, and DBs written by older binaries).
 func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 	st, err := r.St.PlanState(r.plan.ID)
 	if err != nil {
@@ -97,6 +103,9 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 			return nil
 		}
 		failReason, err := r.ensureParentsMerged(ctx, t, byID)
+		if errors.Is(err, errSkipDispatch) {
+			continue // parent merge transiently blocked: retry next tick
+		}
 		if err != nil {
 			return err
 		}
@@ -105,7 +114,7 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 		}
 		if failReason != "" {
 			// Merge conflicts do not self-heal: fail THIS child deterministically.
-			if err := r.failTask(t, failReason, ""); err != nil {
+			if err := r.failTaskKind(t, "dependency_failed", failReason, "", nil); err != nil {
 				return err
 			}
 			continue
@@ -119,21 +128,23 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 }
 
 // createAndDispatch performs the CreateSession call for a task already in
-// the dispatching state, then records task_dispatched. Non-transport
-// create errors (validation, 4xx) fail the task, not the plan.
+// the dispatching state, then records task_dispatched. The scheduler
+// appends the marker-protocol footer here (never trusting the planner LLM
+// to relay it). Non-transport create errors (validation, 4xx) fail the
+// task, not the plan.
 func (r *runner) createAndDispatch(ctx context.Context, t store.Task) error {
 	sess, err := r.AO.CreateSession(ctx, aoclient.SpawnSessionRequest{
 		ProjectID:   r.plan.ProjectID,
 		Kind:        "worker",
 		Harness:     aoclient.Harness(t.Harness),
-		Prompt:      t.Prompt,
+		Prompt:      promptWithFooter(t.Prompt, markerPathFor(r.plan.ID, t.ID)),
 		DisplayName: displayNameFor(r.plan.ID, t.ID),
 	})
 	if err != nil {
 		if isTransport(err) {
 			return err
 		}
-		return r.failTask(t, fmt.Sprintf("create session: %v", err), "")
+		return r.failTaskKind(t, "create_failed", fmt.Sprintf("create session: %v", err), "", nil)
 	}
 	if err := r.St.DispatchTask(r.plan.ID, t.ID, r.runID, sess.ID, sess.Branch); err != nil {
 		return err
@@ -142,9 +153,11 @@ func (r *runner) createAndDispatch(ctx context.Context, t store.Task) error {
 	return nil
 }
 
-// ensureParentsMerged verifies every dependency's PRs are merged before a
-// child is dispatched. Returns a non-empty failReason when the child must
-// fail (unmergeable parent PR); errors are transport/store-fatal only.
+// ensureParentsMerged verifies every dependency's branch is an ancestor of
+// the default branch before a child is dispatched (git ancestry is the
+// source of truth; parents normally merge when they finish). Returns a
+// non-empty failReason when the child must fail; errors are
+// transport/store-fatal only.
 func (r *runner) ensureParentsMerged(ctx context.Context, t store.Task, byID map[string]store.Task) (string, error) {
 	for _, dep := range t.DependsOn {
 		if r.merged[dep] {
@@ -152,27 +165,32 @@ func (r *runner) ensureParentsMerged(ctx context.Context, t store.Task, byID map
 		}
 		parent, ok := byID[dep]
 		if !ok || parent.AOSessionID == nil {
-			r.merged[dep] = true // no session -> nothing to merge
+			r.merged[dep] = true // never dispatched -> nothing to merge
 			continue
 		}
-		sess, err := r.AO.GetSession(ctx, *parent.AOSessionID)
-		if err != nil {
-			if isTransport(err) {
-				return "", err
-			}
-			return fmt.Sprintf("parent %s: get session: %v", dep, err), nil
+		if parent.Branch == nil || *parent.Branch == "" {
+			return fmt.Sprintf("parent %s: no branch recorded, cannot verify its code is merged", dep), nil
 		}
-		for _, pr := range sess.PRs {
-			if pr.State == "merged" {
-				continue
+		merged, err := r.Git.IsMerged(ctx, r.repo, *parent.Branch, r.defaultBranch)
+		if err != nil {
+			return fmt.Sprintf("parent %s: ancestry check %s: %v", dep, *parent.Branch, err), nil
+		}
+		if !merged {
+			// Crash between merge and FinishTask: redo the (idempotent) merge.
+			res, err := r.Git.Merge(ctx, r.repo, *parent.Branch, r.defaultBranch,
+				fmt.Sprintf("om: merge task %s (%s) into %s", dep, *parent.Branch, r.defaultBranch))
+			if err != nil {
+				return fmt.Sprintf("parent %s: merge %s: %v", dep, *parent.Branch, err), nil
 			}
-			if _, err := r.AO.MergePR(ctx, strconv.Itoa(pr.Number)); err != nil {
-				if isTransport(err) {
-					return "", err
-				}
-				return fmt.Sprintf("parent %s: merge PR #%d: %v", dep, pr.Number, err), nil
+			if res.Conflict != "" {
+				return fmt.Sprintf("parent %s: merge %s into %s conflicts", dep, *parent.Branch, r.defaultBranch), nil
 			}
-			r.logf("task %s: merged parent %s PR #%d before dispatch", t.ID, dep, pr.Number)
+			if res.Blocked != "" {
+				// Transient: skip dispatching this child this tick; retried later.
+				r.logf("task %s: parent %s merge blocked (%s) — retrying next tick", t.ID, dep, res.Blocked)
+				return "", errSkipDispatch
+			}
+			r.logf("task %s: merged parent %s branch %s before dispatch", t.ID, dep, *parent.Branch)
 		}
 		r.merged[dep] = true
 	}

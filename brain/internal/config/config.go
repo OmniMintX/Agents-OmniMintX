@@ -24,13 +24,14 @@ type LLM struct {
 
 // Config is the full Overmind configuration.
 type Config struct {
-	AOBaseURL          string `yaml:"ao_base_url"`
-	LLM                LLM    `yaml:"llm"`
-	DBPath             string `yaml:"db_path"`
-	MaxParallel        int    `yaml:"max_parallel"`
-	PollIntervalSec    int    `yaml:"poll_interval_sec"`
-	TaskTimeoutMin     int    `yaml:"task_timeout_min"`
-	NoSignalTimeoutMin int    `yaml:"no_signal_timeout_min"`
+	AOBaseURL              string `yaml:"ao_base_url"`
+	LLM                    LLM    `yaml:"llm"`
+	DBPath                 string `yaml:"db_path"`
+	MaxParallel            int    `yaml:"max_parallel"`
+	PollIntervalSec        int    `yaml:"poll_interval_sec"`
+	TaskTimeoutMin         int    `yaml:"task_timeout_min"`
+	NoSignalTimeoutMin     int    `yaml:"no_signal_timeout_min"`
+	IdleNoMarkerTimeoutMin int    `yaml:"idle_no_marker_timeout_min"`
 }
 
 // Dir returns the Overmind config directory (~/.overmind).
@@ -67,11 +68,12 @@ func Default() (Config, error) {
 			CLIArgs:       []string{"-p", "--output-format", "json"},
 			CLITimeoutSec: 180,
 		},
-		DBPath:             filepath.Join(dir, "overmind.db"),
-		MaxParallel:        3,
-		PollIntervalSec:    15,
-		TaskTimeoutMin:     45,
-		NoSignalTimeoutMin: 10,
+		DBPath:                 filepath.Join(dir, "overmind.db"),
+		MaxParallel:            3,
+		PollIntervalSec:        15,
+		TaskTimeoutMin:         45,
+		NoSignalTimeoutMin:     10,
+		IdleNoMarkerTimeoutMin: 10,
 	}, nil
 }
 
@@ -114,6 +116,7 @@ func applyEnv(cfg *Config) {
 	envInt("OVERMIND_POLL_INTERVAL_SEC", &cfg.PollIntervalSec)
 	envInt("OVERMIND_TASK_TIMEOUT_MIN", &cfg.TaskTimeoutMin)
 	envInt("OVERMIND_NO_SIGNAL_TIMEOUT_MIN", &cfg.NoSignalTimeoutMin)
+	envInt("OVERMIND_IDLE_NO_MARKER_TIMEOUT_MIN", &cfg.IdleNoMarkerTimeoutMin)
 }
 
 func envStr(key string, dst *string) {

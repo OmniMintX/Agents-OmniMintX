@@ -13,6 +13,7 @@ import (
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
 	"github.com/OmniMintX/overmind/internal/config"
+	"github.com/OmniMintX/overmind/internal/gitops"
 	"github.com/OmniMintX/overmind/internal/scheduler"
 	"github.com/OmniMintX/overmind/internal/store"
 )
@@ -38,13 +39,15 @@ func runRun(cfg config.Config, planID string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	s := &scheduler.Scheduler{
-		St: st,
-		AO: aoclient.New(cfg.AOBaseURL),
+		St:  st,
+		AO:  aoclient.New(cfg.AOBaseURL),
+		Git: gitops.Merger{},
 		Cfg: scheduler.Config{
-			MaxParallel:     cfg.MaxParallel,
-			PollInterval:    time.Duration(cfg.PollIntervalSec) * time.Second,
-			TaskTimeout:     time.Duration(cfg.TaskTimeoutMin) * time.Minute,
-			NoSignalTimeout: time.Duration(cfg.NoSignalTimeoutMin) * time.Minute,
+			MaxParallel:         cfg.MaxParallel,
+			PollInterval:        time.Duration(cfg.PollIntervalSec) * time.Second,
+			TaskTimeout:         time.Duration(cfg.TaskTimeoutMin) * time.Minute,
+			NoSignalTimeout:     time.Duration(cfg.NoSignalTimeoutMin) * time.Minute,
+			IdleNoMarkerTimeout: time.Duration(cfg.IdleNoMarkerTimeoutMin) * time.Minute,
 		},
 		PID: int64(os.Getpid()),
 		Log: os.Stdout,

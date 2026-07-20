@@ -42,19 +42,60 @@ func (s *Scheduler) Run(ctx context.Context, planID string) error {
 		return err
 	}
 	defer sc.St.ReleaseRunLock(planID, sc.PID)
+	repo, defBranch, err := sc.resolveRepo(ctx, plan.ProjectID)
+	if err != nil {
+		return err
+	}
 	runID := newRunID()
 	if err := sc.St.StartRun(planID, runID); err != nil {
 		return err
 	}
-	sc.logf("plan %s: run %s started (pid %d)", planID, runID, sc.PID)
+	sc.logf("plan %s: run %s started (pid %d, repo %s, default branch %s)",
+		planID, runID, sc.PID, repo, defBranch)
 	r := &runner{
-		Scheduler: &sc,
-		plan:      plan,
-		runID:     runID,
-		clocks:    make(map[string]*taskClock),
-		merged:    make(map[string]bool),
+		Scheduler:     &sc,
+		plan:          plan,
+		runID:         runID,
+		repo:          repo,
+		defaultBranch: defBranch,
+		clocks:        make(map[string]*taskClock),
+		merged:        make(map[string]bool),
 	}
 	return r.loop(ctx)
+}
+
+// resolveRepo maps the plan's AO project id to its local repo path and
+// default branch, and fail-fasts on repos with origin/<default>: AO bases
+// new worktrees on origin/<default> first, so local merges could never
+// reach children (Phase 1 supports remoteless repos only).
+func (s *Scheduler) resolveRepo(ctx context.Context, projectID string) (repo, defBranch string, err error) {
+	projects, err := s.AO.ListProjects(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("list AO projects: %w", err)
+	}
+	for _, p := range projects {
+		if p.ID == projectID {
+			repo = p.Path
+			break
+		}
+	}
+	if repo == "" {
+		return "", "", fmt.Errorf("AO project %s not found (was it removed from AO?)", projectID)
+	}
+	defBranch, err = s.Git.DefaultBranch(ctx, repo)
+	if err != nil {
+		return "", "", err
+	}
+	hasOrigin, err := s.Git.HasRemoteBranch(ctx, repo, defBranch)
+	if err != nil {
+		return "", "", err
+	}
+	if hasOrigin {
+		return "", "", fmt.Errorf(
+			"repo %s has origin/%s: Phase 1 chaining only supports repos WITHOUT a remote default branch (AO bases new worktrees on origin/%s, which local merges cannot advance)",
+			repo, defBranch, defBranch)
+	}
+	return repo, defBranch, nil
 }
 
 // loop is the poll cycle: heartbeat -> tick -> completion check -> sleep.

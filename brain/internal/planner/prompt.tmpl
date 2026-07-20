@@ -36,8 +36,8 @@ HARD RULES:
    (A -> B, A -> C) are allowed. NEVER give a task two or more parents
    (diamond) — phase 1 has no merge queue, so two parallel branches can
    never be joined back together.
-4. Every task prompt MUST end by instructing the agent to:
-   (a) commit all of its changes when the work is finished, and
-   (b) as the very last action, create a file named {{.DoneMarker}} at the
-       repository root containing a single line that summarizes the result.
+4. Every task prompt MUST state a concrete, checkable definition of done:
+   the exact files/behavior the agent must produce (e.g. "the file X exists
+   and contains Y"). Do NOT add any completion-signal or marker-file
+   instructions — the scheduler appends its own completion protocol.
 5. Use only harness IDs from the AVAILABLE HARNESSES list above.

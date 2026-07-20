@@ -1,0 +1,221 @@
+// Package gitops performs local git operations for Overmind's chaining:
+// AO 0.10.x workers never open PRs (the daemon's PR merge endpoint is a
+// stub), so the scheduler merges each finished task's session branch into
+// the repo's default branch itself, directly on the local filesystem.
+// Git ancestry is the source of truth for "merged-ness"; events are audit.
+package gitops
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// MergeResult is the outcome of one Merge call. Exactly one of the three
+// shapes holds: success (SHA set), Blocked (transient, retry next tick),
+// or Conflict (deterministic failure, does not self-heal).
+type MergeResult struct {
+	SHA      string // tip of target after the call
+	Merged   bool   // a new merge commit was created (false: already ancestor)
+	Blocked  string // non-empty: dirty checkout / foreign merge in progress
+	Conflict string // non-empty: real merge conflict
+}
+
+// Merger shells out to the git CLI. The zero value is ready to use.
+type Merger struct{}
+
+// run executes git -C dir args... and returns trimmed combined output.
+func run(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if err != nil {
+		return s, fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, s)
+	}
+	return s, nil
+}
+
+// exitOne reports whether err is an exec.ExitError with status 1 (git's
+// "no" answer for boolean queries, as opposed to a real failure).
+func exitOne(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == 1
+}
+
+// IsMerged reports whether branch is already an ancestor of target.
+func (Merger) IsMerged(ctx context.Context, repo, branch, target string) (bool, error) {
+	if _, err := run(ctx, repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+		return false, fmt.Errorf("branch %q not found in %s: %w", branch, repo, err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "merge-base", "--is-ancestor",
+		"refs/heads/"+branch, "refs/heads/"+target)
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exitOne(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w", branch, target, err)
+}
+
+// DefaultBranch resolves the repo's default branch from the primary
+// checkout's HEAD; detached HEAD falls back to "main" (AO's own last
+// base-ref candidate).
+func (Merger) DefaultBranch(ctx context.Context, repo string) (string, error) {
+	out, err := run(ctx, repo, "symbolic-ref", "--short", "HEAD")
+	if err == nil {
+		return out, nil
+	}
+	if _, gerr := run(ctx, repo, "rev-parse", "--git-dir"); gerr != nil {
+		return "", fmt.Errorf("%s is not a git repository: %w", repo, gerr)
+	}
+	return "main", nil
+}
+
+// HasRemoteBranch reports whether refs/remotes/origin/<branch> exists.
+// Phase 1 fails fast on such repos: AO bases new worktrees on
+// origin/<default> first, which local merges can never advance.
+func (Merger) HasRemoteBranch(ctx context.Context, repo, branch string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "show-ref", "--verify", "--quiet",
+		"refs/remotes/origin/"+branch)
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return false, nil
+	}
+	return false, fmt.Errorf("git show-ref origin/%s: %w", branch, err)
+}
+
+// Merge merges branch into target with a real 3-way merge (--no-ff).
+// Already-ancestor is an idempotent no-op. If target is checked out in
+// some worktree the merge runs in place (clean tree required, else
+// Blocked); otherwise a deterministic temp worktree is used and removed
+// afterwards (leftovers from a crash are recovered first).
+func (m Merger) Merge(ctx context.Context, repo, branch, target, msg string) (MergeResult, error) {
+	merged, err := m.IsMerged(ctx, repo, branch, target)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	if merged {
+		sha, err := run(ctx, repo, "rev-parse", "refs/heads/"+target)
+		return MergeResult{SHA: sha}, err
+	}
+	dir, err := checkoutOf(ctx, repo, target)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	if dir != "" {
+		return mergeAt(ctx, dir, branch, target, msg, false)
+	}
+	wt := tempWorktreePath(repo, branch, target)
+	if _, err := os.Stat(wt); err == nil {
+		// Leftover from a crashed previous merge: remove and start over.
+		_, _ = run(ctx, repo, "worktree", "remove", "--force", wt)
+		_ = os.RemoveAll(wt)
+		_, _ = run(ctx, repo, "worktree", "prune")
+	}
+	if _, err := run(ctx, repo, "worktree", "add", wt, target); err != nil {
+		return MergeResult{}, err
+	}
+	defer func() {
+		_, _ = run(context.Background(), repo, "worktree", "remove", "--force", wt)
+	}()
+	return mergeAt(ctx, wt, branch, target, msg, true)
+}
+
+// mergeAt runs the actual merge inside dir, which has target checked out.
+// temp worktrees skip the dirty check (freshly created, always clean).
+func mergeAt(ctx context.Context, dir, branch, target, msg string, temp bool) (MergeResult, error) {
+	if !temp {
+		if blocked, err := recoverMergeHead(ctx, dir, branch); err != nil {
+			return MergeResult{}, err
+		} else if blocked != "" {
+			return MergeResult{Blocked: blocked}, nil
+		}
+		status, err := run(ctx, dir, "status", "--porcelain")
+		if err != nil {
+			return MergeResult{}, err
+		}
+		if status != "" {
+			return MergeResult{Blocked: fmt.Sprintf("checkout of %s at %s has uncommitted changes", target, dir)}, nil
+		}
+	}
+	out, err := run(ctx, dir, "merge", "--no-ff", "--no-edit", "-m", msg, "refs/heads/"+branch)
+	if err != nil {
+		_, _ = run(ctx, dir, "merge", "--abort")
+		if strings.Contains(strings.ToLower(out), "conflict") {
+			return MergeResult{Conflict: out}, nil
+		}
+		return MergeResult{}, err
+	}
+	sha, err := run(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		return MergeResult{}, err
+	}
+	return MergeResult{SHA: sha, Merged: true}, nil
+}
+
+// recoverMergeHead handles a MERGE_HEAD left in dir by a crash: if it is
+// OUR merge (MERGE_HEAD == tip of branch) abort it and continue; anything
+// else belongs to the user -> blocked, never touched.
+func recoverMergeHead(ctx context.Context, dir, branch string) (blocked string, err error) {
+	mh, err := run(ctx, dir, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	if err != nil {
+		return "", nil // no merge in progress
+	}
+	tip, err := run(ctx, dir, "rev-parse", "refs/heads/"+branch)
+	if err != nil {
+		return "", err
+	}
+	if mh != tip {
+		return fmt.Sprintf("a foreign merge is in progress at %s (MERGE_HEAD %s)", dir, mh[:12]), nil
+	}
+	if _, err := run(ctx, dir, "merge", "--abort"); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+// checkoutOf returns the worktree directory where target is currently
+// checked out ("" when none). Overmind's own temp worktrees are ignored
+// (a crashed leftover must not force an in-place merge path).
+func checkoutOf(ctx context.Context, repo, target string) (string, error) {
+	out, err := run(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	var dir string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			dir = strings.TrimPrefix(line, "worktree ")
+		case line == "branch refs/heads/"+target:
+			if strings.HasPrefix(filepath.Base(dir), "om-merge-") {
+				continue
+			}
+			return dir, nil
+		}
+	}
+	return "", nil
+}
+
+// tempWorktreePath is deterministic per (repo, target) so a crashed merge
+// leaves a recoverable, predictable path (R11).
+func tempWorktreePath(repo, _ /*branch*/, target string) string {
+	return filepath.Join(os.TempDir(), "om-merge-"+shortHash(repo+"\x00"+target))
+}
+
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:4])
+}

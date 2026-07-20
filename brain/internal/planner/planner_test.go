@@ -20,9 +20,9 @@ func planFixture(t *testing.T, tasks ...taskJSON) string {
 	return string(data)
 }
 
-// okPrompt returns a prompt that satisfies the DoneMarker rule.
+// okPrompt returns a prompt with a concrete definition of done (rule 4).
 func okPrompt(body string) string {
-	return body + " When finished, commit all changes and create the .om-done marker file at the repo root."
+	return body + " Done when the described files exist with the expected content."
 }
 
 func validFixture(t *testing.T) string {
@@ -110,12 +110,14 @@ func TestParsePromptTooLong(t *testing.T) {
 	}
 }
 
-func TestParseMissingDoneMarker(t *testing.T) {
+// TestParseNoMarkerRequired: the completion-marker protocol is injected by
+// the scheduler at dispatch, so a prompt without any marker mention is valid.
+func TestParseNoMarkerRequired(t *testing.T) {
 	fx := planFixture(t,
-		taskJSON{Title: "a", Prompt: "Do A, no marker mentioned.", Harness: "codex"},
+		taskJSON{Title: "a", Prompt: "Do A. Done when a.txt exists.", Harness: "codex"},
 	)
-	if _, err := Parse([]byte(fx), testHarnesses); err == nil || !strings.Contains(err.Error(), DoneMarker) {
-		t.Fatalf("want done-marker error, got %v", err)
+	if _, err := Parse([]byte(fx), testHarnesses); err != nil {
+		t.Fatalf("prompt without marker must be valid: %v", err)
 	}
 }
 
@@ -170,10 +172,13 @@ func TestGeneratePromptContents(t *testing.T) {
 		t.Fatalf("want exactly 1 LLM call, got %d", len(llm.prompts))
 	}
 	p := llm.prompts[0]
-	for _, want := range []string{"build the thing", "claude-code", "codex", DoneMarker, "3500", "commit"} {
+	for _, want := range []string{"build the thing", "claude-code", "codex", "3500", "definition of done"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
+	}
+	if strings.Contains(p, ".om-done") {
+		t.Error("planner prompt must NOT mention the marker (scheduler injects it)")
 	}
 }
 

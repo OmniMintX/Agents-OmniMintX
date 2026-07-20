@@ -49,7 +49,7 @@ func runHalfPlan(t *testing.T, s *Store) {
 		s.StartRun("p1", "run-1"),
 		s.DispatchTask("p1", "a", "run-1", "sess-a", "ao/sess-a/root"),
 		s.StartTask("p1", "a", "run-1"),
-		s.FinishTask("p1", "a", "run-1", "https://pr/1"),
+		s.FinishTask("p1", "a", "run-1", "https://pr/1", ""),
 		s.DispatchTask("p1", "b", "run-1", "sess-b", "ao/sess-b/root"),
 		s.StartTask("p1", "b", "run-1"),
 	}

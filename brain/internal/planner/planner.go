@@ -16,14 +16,10 @@ import (
 //go:embed prompt.tmpl
 var promptTmpl string
 
-const (
-	// MaxPromptChars caps each task prompt, leaving headroom for the
-	// scheduler to append context under AO's 4096-byte spawn limit.
-	MaxPromptChars = 3500
-	// DoneMarker is the repo-root file every task prompt must instruct the
-	// agent to create as its last action ("task done" signal for OM-5).
-	DoneMarker = ".om-done"
-)
+// MaxPromptChars caps each task prompt, leaving headroom for the
+// scheduler to append its completion-protocol footer under AO's
+// 4096-byte spawn limit.
+const MaxPromptChars = 3500
 
 // LLM is the single-shot completion interface (mocked in tests).
 type LLM interface {
@@ -113,8 +109,7 @@ func renderPrompt(in Input) (string, error) {
 		Goal           string
 		Harnesses      []string
 		MaxPromptChars int
-		DoneMarker     string
-	}{in.Goal, in.Harnesses, MaxPromptChars, DoneMarker})
+	}{in.Goal, in.Harnesses, MaxPromptChars})
 	if err != nil {
 		return "", fmt.Errorf("planner: render prompt.tmpl: %w", err)
 	}

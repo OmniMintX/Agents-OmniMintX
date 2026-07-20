@@ -134,13 +134,14 @@ func (s *Store) ResumeTask(planID, taskID, runID string) error {
 		TaskRunning, taskID, planID, TaskNeedsHuman)
 }
 
-// FinishTask: dispatched|running|needs_human -> done, with optional PR URL.
-func (s *Store) FinishTask(planID, taskID, runID, prURL string) error {
+// FinishTask: dispatched|running|needs_human -> done, with optional PR URL
+// and a structured task_done payload (marker summary etc.).
+func (s *Store) FinishTask(planID, taskID, runID, prURL, payloadJSON string) error {
 	var pr any
 	if prURL != "" {
 		pr = prURL
 	}
-	return s.taskTransition(planID, taskID, runID, EventTaskDone, "",
+	return s.taskTransition(planID, taskID, runID, EventTaskDone, payloadJSON,
 		`UPDATE tasks SET status = ?, pr_url = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?)`,
 		TaskDone, pr, taskID, planID, TaskDispatched, TaskRunning, TaskNeedsHuman)
 }
@@ -158,6 +159,23 @@ func (s *Store) FailTask(planID, taskID, runID, payloadJSON string) error {
 func (s *Store) RecordAOUnreachable(planID, runID, payloadJSON string) error {
 	return s.inTx(func(tx *sql.Tx) error {
 		return appendEvent(tx, planID, "", runID, EventAOUnreachable, payloadJSON)
+	})
+}
+
+// RecordTaskBranchMerged appends the informational task_branch_merged
+// audit event (no state change; git ancestry is the source of truth).
+func (s *Store) RecordTaskBranchMerged(planID, taskID, runID, payloadJSON string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		return appendEvent(tx, planID, taskID, runID, EventTaskBranchMerged, payloadJSON)
+	})
+}
+
+// RecordMergeBlocked appends the informational merge_blocked event: the
+// local merge cannot proceed yet (dirty checkout / foreign merge) and will
+// be retried next tick without failing the task.
+func (s *Store) RecordMergeBlocked(planID, taskID, runID, payloadJSON string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		return appendEvent(tx, planID, taskID, runID, EventMergeBlocked, payloadJSON)
 	})
 }
 

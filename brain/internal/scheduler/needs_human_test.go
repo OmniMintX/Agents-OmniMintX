@@ -21,9 +21,11 @@ func TestRunNeedsHumanEscalatesThenResumes(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		script = append(script, sessStep{status: aoclient.StatusNeedsInput})
 	}
+	doneStep := stepMarker(aoclient.StatusIdle, "ok: finished after resume")
+	doneStep.pr = 7
 	script = append(script,
 		sessStep{status: aoclient.StatusWorking},
-		sessStep{status: aoclient.StatusIdle, marker: true, pr: 7},
+		doneStep,
 	)
 	ao.scripts[displayNameFor("plan-1", "a1234567")] = script
 

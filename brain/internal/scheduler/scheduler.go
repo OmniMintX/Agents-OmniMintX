@@ -2,12 +2,17 @@
 // ready tasks of an approved plan as AO sessions, polls them, and derives
 // task outcomes until the plan is done or failed.
 //
-// Rules locked after the 07/2026 red-team review:
+// Rules locked after the 07/2026 red-team reviews:
 //   - Idempotent dispatch: task_dispatching (intent) is recorded BEFORE the
 //     CreateSession HTTP call; displayName "om-"+hash(plan_id,task_id)[:8]
 //     is the idempotency marker checked against ListSessions on resume.
-//   - "Done" = idle session with the .om-done marker file; its PRs are then
-//     merged (merge-before-dispatch keeps children able to see parent code).
+//   - "Done" = terminal session whose per-task marker .om-done.<hex8> starts
+//     with "ok:". The scheduler injects the marker protocol as a prompt
+//     footer at dispatch (never trusts the planner LLM to relay it).
+//   - Chaining: AO 0.10.x workers never open PRs (the daemon MergePR is a
+//     stub), so on "ok" the scheduler merges the session branch into the
+//     repo's default branch itself (gitops.Merger) BEFORE FinishTask; git
+//     ancestry is the source of truth, ensureParentsMerged only re-checks.
 //   - needs_input/changes_requested = NEEDS_HUMAN: escalate, stop the
 //     timeout clock, never fail.
 //   - AO unreachable = exponential backoff + one ao_unreachable event; the
@@ -25,12 +30,15 @@ import (
 	"time"
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
+	"github.com/OmniMintX/overmind/internal/gitops"
 	"github.com/OmniMintX/overmind/internal/store"
 )
 
-// DoneMarker is the file an agent must create at the workspace root to
-// signal "my work is complete" (AO has no done/success session status).
-const DoneMarker = ".om-done"
+// DoneMarkerPrefix prefixes the per-task completion marker file name:
+// ".om-done.<hex8>" where hex8 is the same hash used in the session
+// displayName ("om-<hex8>"). Per-task names make a parent's committed
+// marker harmless to its children (no inherited false-done).
+const DoneMarkerPrefix = ".om-done."
 
 // AO is the slice of the AO daemon API the scheduler needs. *aoclient.Client
 // satisfies it; tests substitute a fake.
@@ -39,19 +47,28 @@ type AO interface {
 	GetSession(ctx context.Context, sessionID string) (aoclient.Session, error)
 	ListSessions(ctx context.Context, filter aoclient.ListSessionsFilter) ([]aoclient.Session, error)
 	KillSession(ctx context.Context, sessionID string) (aoclient.KillSessionResult, error)
-	MergePR(ctx context.Context, prID string) (aoclient.MergePRResult, error)
-	ListWorkspaceFiles(ctx context.Context, sessionID string) (aoclient.WorkspaceFiles, error)
+	ListProjects(ctx context.Context) ([]aoclient.ProjectSummary, error)
 	PreviewFile(ctx context.Context, sessionID, filePath string) (string, bool, error)
+}
+
+// LocalMerger is the git surface the scheduler needs for chaining.
+// gitops.Merger satisfies it; tests substitute a fake.
+type LocalMerger interface {
+	IsMerged(ctx context.Context, repo, branch, target string) (bool, error)
+	Merge(ctx context.Context, repo, branch, target, msg string) (gitops.MergeResult, error)
+	DefaultBranch(ctx context.Context, repo string) (string, error)
+	HasRemoteBranch(ctx context.Context, repo, branch string) (bool, error)
 }
 
 // Config are the scheduler knobs (from ~/.overmind/config.yaml).
 type Config struct {
-	MaxParallel     int           // concurrent AO sessions (default 3)
-	PollInterval    time.Duration // session poll cadence (default 15s)
-	TaskTimeout     time.Duration // max time without a status change (default 45m)
-	NoSignalTimeout time.Duration // max continuous no_signal (default 10m)
-	LockStaleAfter  time.Duration // run-lock heartbeat freshness (default 60s)
-	MaxBackoff      time.Duration // AO-unreachable backoff cap (default 60s)
+	MaxParallel         int           // concurrent AO sessions (default 3)
+	PollInterval        time.Duration // session poll cadence (default 15s)
+	TaskTimeout         time.Duration // max time without a status change (default 45m)
+	NoSignalTimeout     time.Duration // max continuous no_signal (default 10m)
+	IdleNoMarkerTimeout time.Duration // idle without the done marker (default 10m)
+	LockStaleAfter      time.Duration // run-lock heartbeat freshness (default 60s)
+	MaxBackoff          time.Duration // AO-unreachable backoff cap (default 60s)
 }
 
 func (c Config) withDefaults() Config {
@@ -67,6 +84,9 @@ func (c Config) withDefaults() Config {
 	if c.NoSignalTimeout <= 0 {
 		c.NoSignalTimeout = 10 * time.Minute
 	}
+	if c.IdleNoMarkerTimeout <= 0 {
+		c.IdleNoMarkerTimeout = 10 * time.Minute
+	}
 	if c.LockStaleAfter <= 0 {
 		c.LockStaleAfter = time.Minute
 	}
@@ -81,6 +101,7 @@ func (c Config) withDefaults() Config {
 type Scheduler struct {
 	St  *store.Store
 	AO  AO
+	Git LocalMerger
 	Cfg Config
 	PID int64 // run-lock owner (os.Getpid())
 
@@ -95,15 +116,19 @@ type taskClock struct {
 	lastStatus   aoclient.SessionStatus
 	lastChangeAt time.Time // when the observed AO status last changed
 	noSignalAt   time.Time // start of the current no_signal streak (zero = none)
+	markerBad    bool      // previous poll saw a malformed marker (grace of one poll)
+	blockedNoted bool      // merge_blocked already recorded for the current streak
 }
 
 // runner is the per-run state of one Scheduler.Run invocation.
 type runner struct {
 	*Scheduler
-	plan   *store.Plan
-	runID  string
-	clocks map[string]*taskClock
-	merged map[string]bool // parent task id -> all its PRs verified merged
+	plan          *store.Plan
+	runID         string
+	repo          string // project repo path (from AO ListProjects)
+	defaultBranch string // merge target, e.g. "main"
+	clocks        map[string]*taskClock
+	merged        map[string]bool // parent task id -> branch verified merged
 }
 
 func (s *Scheduler) logf(format string, args ...any) {
@@ -120,15 +145,25 @@ func newRunID() string {
 	return "run-" + hex.EncodeToString(b[:])
 }
 
-// displayNameFor builds the AO session display name that doubles as the
-// idempotent-dispatch marker: "om-" + first 8 hex chars of
-// sha256(planID, taskID). Planner task ids are sequential (t1..tN), so the
-// plan id must participate or plans in the same project would collide and
-// resume could adopt another plan's session. Always 11 runes, under AO's
-// 20-rune cap.
-func displayNameFor(planID, taskID string) string {
+// taskHash8 is the shared 8-hex-char identity of one (plan, task) pair,
+// used by both the session displayName ("om-<hex8>") and the per-task done
+// marker (".om-done.<hex8>"). Planner task ids are sequential (t1..tN), so
+// the plan id must participate or plans in the same project would collide.
+func taskHash8(planID, taskID string) string {
 	sum := sha256.Sum256([]byte(planID + "\x00" + taskID))
-	return "om-" + hex.EncodeToString(sum[:4])
+	return hex.EncodeToString(sum[:4])
+}
+
+// displayNameFor builds the AO session display name that doubles as the
+// idempotent-dispatch marker. Always 11 runes, under AO's 20-rune cap.
+func displayNameFor(planID, taskID string) string {
+	return "om-" + taskHash8(planID, taskID)
+}
+
+// markerPathFor is the repo-root file the task's agent must create as its
+// last action: ".om-done.<hex8>", first line "ok: ..." or "fail: ...".
+func markerPathFor(planID, taskID string) string {
+	return DoneMarkerPrefix + taskHash8(planID, taskID)
 }
 
 // isTransport reports whether err means "the AO daemon is unreachable"
