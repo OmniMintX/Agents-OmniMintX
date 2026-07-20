@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -116,17 +117,25 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 }
 
 // hasDoneMarker reports whether the session workspace contains .om-done.
+// AO 0.10.x daemons have no workspace/files listing route (404
+// ROUTE_NOT_FOUND); fall back to probing the marker directly through the
+// per-file preview route, which those versions do serve.
 func (r *runner) hasDoneMarker(ctx context.Context, sessionID string) (bool, error) {
 	files, err := r.AO.ListWorkspaceFiles(ctx, sessionID)
-	if err != nil {
-		return false, err
-	}
-	for _, f := range files.Files {
-		if f.Path == DoneMarker && f.Status != "deleted" {
-			return true, nil
+	if err == nil {
+		for _, f := range files.Files {
+			if f.Path == DoneMarker && f.Status != "deleted" {
+				return true, nil
+			}
 		}
+		return false, nil
 	}
-	return false, nil
+	var apiErr *aoclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "ROUTE_NOT_FOUND" {
+		_, found, perr := r.AO.PreviewFile(ctx, sessionID, DoneMarker)
+		return found, perr
+	}
+	return false, err
 }
 
 // mergeSessionPRs merges every unmerged PR of a finished session. A merge

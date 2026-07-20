@@ -222,6 +222,39 @@ func (c *Client) ListWorkspaceFiles(ctx context.Context, sessionID string) (Work
 	return out, nil
 }
 
+// PreviewFile calls GET /api/v1/sessions/{sessionId}/preview/files/{path} and
+// returns the raw file content. AO 0.10.x daemons lack the workspace/files
+// listing route but serve individual worktree files here (the route behind
+// session.previewUrl). A 404 means the file does not exist: found=false, no
+// error. Callers must have already confirmed the session exists (GetSession),
+// since a missing session also answers 404 on this route.
+func (c *Client) PreviewFile(ctx context.Context, sessionID, filePath string) (content string, found bool, err error) {
+	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/preview/files/" + url.PathEscape(filePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("aoclient: build request: %w", err)
+	}
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", false, err
+		}
+		return "", false, fmt.Errorf("%w (GET %s: %v)", ErrDaemonNotRunning, u, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", false, decodeAPIError(resp)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", false, fmt.Errorf("aoclient: read response: %w", err)
+	}
+	return string(b), true, nil
+}
+
 // MergePR calls POST /api/v1/prs/{id}/merge, where id is the PR number.
 // Route: backend/internal/httpd/controllers/prs.go:22.
 func (c *Client) MergePR(ctx context.Context, prID string) (MergePRResult, error) {

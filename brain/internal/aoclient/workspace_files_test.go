@@ -60,3 +60,42 @@ func TestListWorkspaceFilesNotFound(t *testing.T) {
 		t.Fatalf("want SESSION_NOT_FOUND APIError, got %v", err)
 	}
 }
+
+func TestPreviewFileFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/v1/sessions/sess-1/preview/files/.om-done" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+		// AO serves the raw file body as text/plain (no JSON wrapper).
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Created greeting.txt\n"))
+	})
+	content, found, err := c.PreviewFile(context.Background(), "sess-1", ".om-done")
+	if err != nil || !found || content != "Created greeting.txt\n" {
+		t.Fatalf("PreviewFile = (%q, %v, %v), want content, found, nil", content, found, err)
+	}
+}
+
+func TestPreviewFileMissingIs404NotError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// AO 0.10.x answers a plain-text 404 (not the APIError envelope)
+		// when the file does not exist in the worktree.
+		http.NotFound(w, r)
+	})
+	content, found, err := c.PreviewFile(context.Background(), "sess-1", ".om-done")
+	if err != nil || found || content != "" {
+		t.Fatalf("PreviewFile = (%q, %v, %v), want not-found without error", content, found, err)
+	}
+}
+
+func TestPreviewFileServerError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(t, w, http.StatusInternalServerError, "internal", "INTERNAL", "boom")
+	})
+	_, _, err := c.PreviewFile(context.Background(), "sess-1", ".om-done")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusInternalServerError {
+		t.Fatalf("want 500 APIError, got %v", err)
+	}
+}

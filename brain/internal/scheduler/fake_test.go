@@ -37,6 +37,9 @@ type fakeAO struct {
 	maxActive int
 	failGets  int
 	onCreate  func(f *fakeAO, in aoclient.SpawnSessionRequest)
+	// wsFilesRouteMissing mimics AO 0.10.x: the workspace/files listing
+	// route answers 404 ROUTE_NOT_FOUND (per-file preview still works).
+	wsFilesRouteMissing bool
 }
 
 func newFakeAO() *fakeAO {
@@ -179,11 +182,29 @@ func (f *fakeAO) MergePR(_ context.Context, prID string) (aoclient.MergePRResult
 func (f *fakeAO) ListWorkspaceFiles(_ context.Context, sessionID string) (aoclient.WorkspaceFiles, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.wsFilesRouteMissing {
+		return aoclient.WorkspaceFiles{}, &aoclient.APIError{HTTPStatus: 404, Kind: "not_found", Code: "ROUTE_NOT_FOUND", Message: "GET /api/v1/sessions/" + sessionID + "/workspace/files has no handler"}
+	}
 	fs, ok := f.sessions[sessionID]
 	if !ok {
 		return aoclient.WorkspaceFiles{}, &aoclient.APIError{HTTPStatus: 404, Kind: "not_found", Code: "SESSION_NOT_FOUND", Message: sessionID}
 	}
 	return aoclient.WorkspaceFiles{SessionID: sessionID, Files: fs.files}, nil
+}
+
+func (f *fakeAO) PreviewFile(_ context.Context, sessionID, filePath string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fs, ok := f.sessions[sessionID]
+	if !ok {
+		return "", false, nil
+	}
+	for _, fl := range fs.files {
+		if fl.Path == filePath && fl.Status != "deleted" {
+			return "marker", true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (f *fakeAO) events() []string {

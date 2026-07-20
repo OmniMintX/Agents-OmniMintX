@@ -104,6 +104,26 @@ func TestRunDAGOrder(t *testing.T) {
 	}
 }
 
+// TestRunDoneMarkerPreviewFallback: AO 0.10.x daemons answer 404
+// ROUTE_NOT_FOUND on the workspace/files listing; the scheduler must fall
+// back to the per-file preview route to see .om-done instead of failing
+// the task (found live in the OM-6 E2E run against AO 0.10.3).
+func TestRunDoneMarkerPreviewFallback(t *testing.T) {
+	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.wsFilesRouteMissing = true
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(1)
+
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := planStatus(t, st); got != store.PlanDone {
+		t.Fatalf("plan status = %s, want done", got)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskDone {
+		t.Fatalf("task a = %s, want done", got)
+	}
+}
+
 // TestRunMaxParallel: 4 independent tasks with MaxParallel=2 must never
 // have more than 2 live AO sessions at once.
 func TestRunMaxParallel(t *testing.T) {

@@ -41,6 +41,7 @@ type AO interface {
 	KillSession(ctx context.Context, sessionID string) (aoclient.KillSessionResult, error)
 	MergePR(ctx context.Context, prID string) (aoclient.MergePRResult, error)
 	ListWorkspaceFiles(ctx context.Context, sessionID string) (aoclient.WorkspaceFiles, error)
+	PreviewFile(ctx context.Context, sessionID, filePath string) (string, bool, error)
 }
 
 // Config are the scheduler knobs (from ~/.overmind/config.yaml).
