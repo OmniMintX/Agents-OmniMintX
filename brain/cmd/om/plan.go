@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
 	"github.com/OmniMintX/overmind/internal/config"
@@ -26,9 +27,9 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	if strings.TrimSpace(project) == "" {
 		return fmt.Errorf("--project is required (AO project id or repository path)")
 	}
-	apiKey := os.Getenv(cfg.LLM.APIKeyEnv)
-	if apiKey == "" {
-		return fmt.Errorf("LLM API key missing: set the %s environment variable", cfg.LLM.APIKeyEnv)
+	llm, llmDesc, err := newLLM(cfg)
+	if err != nil {
+		return err
 	}
 	ctx := context.Background()
 	ao := aoclient.New(cfg.AOBaseURL)
@@ -42,8 +43,7 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	}
 
 	fmt.Printf("Planning with %s (project %s, harnesses: %s)...\n",
-		cfg.LLM.Model, projectID, strings.Join(harnesses, ", "))
-	llm := planner.NewAnthropic(apiKey, cfg.LLM.Model)
+		llmDesc, projectID, strings.Join(harnesses, ", "))
 	plan, err := planner.New(llm).Generate(ctx, planner.Input{Goal: goal, Harnesses: harnesses})
 	if err != nil {
 		return err
@@ -76,6 +76,69 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	printPlanTable(planID, goal, plan.Tasks)
 	fmt.Printf("\nPlan %s saved as draft. Approve with: om approve %s\n", planID, planID)
 	return nil
+}
+
+// newLLM builds the planner LLM from config. Provider anthropic|openai|cli;
+// when unset it auto-detects: cli if the CLI binary is installed, else
+// anthropic if its API key env var is set. API key VALUES are never printed.
+func newLLM(cfg config.Config) (planner.LLM, string, error) {
+	cliCmd := cfg.LLM.CLICommand
+	if cliCmd == "" {
+		cliCmd = "claude"
+	}
+	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
+	if provider == "" || provider == "auto" {
+		switch {
+		case commandExists(cliCmd):
+			provider = "cli"
+		case os.Getenv(keyEnvName(cfg, "ANTHROPIC_API_KEY")) != "":
+			provider = "anthropic"
+		default:
+			return nil, "", fmt.Errorf("no LLM provider available; either: install the %q CLI (llm.provider: cli), set the %s environment variable (llm.provider: anthropic), or configure an OpenAI-compatible endpoint (llm.provider: openai with llm.model, llm.base_url, llm.api_key_env)",
+				cliCmd, keyEnvName(cfg, "ANTHROPIC_API_KEY"))
+		}
+	}
+	switch provider {
+	case "anthropic":
+		envName := keyEnvName(cfg, "ANTHROPIC_API_KEY")
+		key := os.Getenv(envName)
+		if key == "" {
+			return nil, "", fmt.Errorf("LLM API key missing: set the %s environment variable", envName)
+		}
+		return planner.NewAnthropic(key, cfg.LLM.Model), "anthropic/" + cfg.LLM.Model, nil
+	case "openai":
+		envName := keyEnvName(cfg, "OPENAI_API_KEY")
+		key := os.Getenv(envName)
+		if key == "" {
+			return nil, "", fmt.Errorf("LLM API key missing: set the %s environment variable", envName)
+		}
+		return planner.NewOpenAI(key, cfg.LLM.Model, cfg.LLM.BaseURL), "openai/" + cfg.LLM.Model, nil
+	case "cli":
+		if !commandExists(cliCmd) {
+			return nil, "", fmt.Errorf("llm.provider is cli but command %q was not found in PATH", cliCmd)
+		}
+		timeout := time.Duration(cfg.LLM.CLITimeoutSec) * time.Second
+		if timeout <= 0 {
+			timeout = 3 * time.Minute
+		}
+		return planner.NewCLI(cliCmd, cfg.LLM.CLIArgs, timeout), "cli/" + cliCmd, nil
+	default:
+		return nil, "", fmt.Errorf("unknown llm.provider %q (expected anthropic, openai or cli)", cfg.LLM.Provider)
+	}
+}
+
+// keyEnvName returns the configured API key env var name, or fallback.
+func keyEnvName(cfg config.Config, fallback string) string {
+	if cfg.LLM.APIKeyEnv != "" {
+		return cfg.LLM.APIKeyEnv
+	}
+	return fallback
+}
+
+// commandExists reports whether cmd resolves in PATH.
+func commandExists(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
 }
 
 // resolveProject maps --project (AO project id or path) to a project id,

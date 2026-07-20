@@ -13,9 +13,13 @@ import (
 
 // LLM holds planner LLM settings.
 type LLM struct {
-	Provider  string `yaml:"provider"`
-	Model     string `yaml:"model"`
-	APIKeyEnv string `yaml:"api_key_env"`
+	Provider      string   `yaml:"provider"`        // anthropic | openai | cli (empty = auto-detect)
+	Model         string   `yaml:"model"`
+	APIKeyEnv     string   `yaml:"api_key_env"`     // env var holding the API key (empty = provider default)
+	BaseURL       string   `yaml:"base_url"`        // openai provider: API base, e.g. https://api.deepseek.com
+	CLICommand    string   `yaml:"cli_command"`     // cli provider: binary to run
+	CLIArgs       []string `yaml:"cli_args"`        // cli provider: args before the prompt
+	CLITimeoutSec int      `yaml:"cli_timeout_sec"` // cli provider: subprocess timeout
 }
 
 // Config is the full Overmind configuration.
@@ -56,9 +60,12 @@ func Default() (Config, error) {
 	return Config{
 		AOBaseURL: "http://127.0.0.1:3001",
 		LLM: LLM{
-			Provider:  "anthropic",
-			Model:     "claude-sonnet-4-5",
-			APIKeyEnv: "ANTHROPIC_API_KEY",
+			Provider:      "", // auto-detect: cli when the binary exists, else anthropic
+			Model:         "claude-sonnet-4-5",
+			APIKeyEnv:     "", // resolved per provider (ANTHROPIC_API_KEY / OPENAI_API_KEY)
+			CLICommand:    "claude",
+			CLIArgs:       []string{"-p", "--output-format", "json"},
+			CLITimeoutSec: 180,
 		},
 		DBPath:             filepath.Join(dir, "overmind.db"),
 		MaxParallel:        3,
@@ -99,6 +106,9 @@ func applyEnv(cfg *Config) {
 	envStr("OVERMIND_LLM_PROVIDER", &cfg.LLM.Provider)
 	envStr("OVERMIND_LLM_MODEL", &cfg.LLM.Model)
 	envStr("OVERMIND_LLM_API_KEY_ENV", &cfg.LLM.APIKeyEnv)
+	envStr("OVERMIND_LLM_BASE_URL", &cfg.LLM.BaseURL)
+	envStr("OVERMIND_LLM_CLI_COMMAND", &cfg.LLM.CLICommand)
+	envInt("OVERMIND_LLM_CLI_TIMEOUT_SEC", &cfg.LLM.CLITimeoutSec)
 	envStr("OVERMIND_DB_PATH", &cfg.DBPath)
 	envInt("OVERMIND_MAX_PARALLEL", &cfg.MaxParallel)
 	envInt("OVERMIND_POLL_INTERVAL_SEC", &cfg.PollIntervalSec)

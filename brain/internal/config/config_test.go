@@ -14,8 +14,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AOBaseURL != "http://127.0.0.1:3001" {
 		t.Errorf("AOBaseURL = %q", cfg.AOBaseURL)
 	}
-	if cfg.LLM.Provider != "anthropic" || cfg.LLM.Model != "claude-sonnet-4-5" || cfg.LLM.APIKeyEnv != "ANTHROPIC_API_KEY" {
+	if cfg.LLM.Provider != "" || cfg.LLM.Model != "claude-sonnet-4-5" || cfg.LLM.APIKeyEnv != "" {
 		t.Errorf("LLM = %+v", cfg.LLM)
+	}
+	if cfg.LLM.CLICommand != "claude" || cfg.LLM.CLITimeoutSec != 180 {
+		t.Errorf("LLM cli defaults = %+v", cfg.LLM)
+	}
+	if len(cfg.LLM.CLIArgs) != 3 || cfg.LLM.CLIArgs[0] != "-p" {
+		t.Errorf("LLM.CLIArgs = %v", cfg.LLM.CLIArgs)
 	}
 	if filepath.Base(cfg.DBPath) != "overmind.db" {
 		t.Errorf("DBPath = %q", cfg.DBPath)
@@ -50,7 +56,7 @@ func TestLoadFileAndEnvOverride(t *testing.T) {
 	if cfg.PollIntervalSec != 7 {
 		t.Errorf("env override PollIntervalSec = %d", cfg.PollIntervalSec)
 	}
-	if cfg.LLM.Provider != "anthropic" {
-		t.Errorf("unset field should keep default: %q", cfg.LLM.Provider)
+	if cfg.LLM.CLICommand != "claude" {
+		t.Errorf("unset field should keep default: %q", cfg.LLM.CLICommand)
 	}
 }

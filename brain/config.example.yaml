@@ -7,9 +7,47 @@ ao_base_url: http://127.0.0.1:3001
 
 # Planner LLM settings.
 llm:
-  provider: anthropic                        # env: OVERMIND_LLM_PROVIDER
+  # Provider: anthropic | openai | cli.      env: OVERMIND_LLM_PROVIDER
+  # Empty = auto-detect: cli when cli_command is installed, else anthropic
+  # when its API key env var is set.
+  provider: ""
   model: claude-sonnet-4-5                   # env: OVERMIND_LLM_MODEL
-  api_key_env: ANTHROPIC_API_KEY             # env: OVERMIND_LLM_API_KEY_ENV
+  # Env var NAME holding the API key.        env: OVERMIND_LLM_API_KEY_ENV
+  # Empty = ANTHROPIC_API_KEY (anthropic) / OPENAI_API_KEY (openai).
+  api_key_env: ""
+  # openai provider only: API base URL.      env: OVERMIND_LLM_BASE_URL
+  # Empty = https://api.openai.com/v1. DeepSeek: https://api.deepseek.com
+  # Ollama: http://localhost:11434/v1
+  base_url: ""
+  # cli provider: headless coding-agent CLI. env: OVERMIND_LLM_CLI_COMMAND
+  cli_command: claude
+  # Args placed before the prompt (prompt is appended as the last arg).
+  cli_args: ["-p", "--output-format", "json"]
+  # Subprocess timeout (seconds).            env: OVERMIND_LLM_CLI_TIMEOUT_SEC
+  cli_timeout_sec: 180
+
+# Filled-in samples for the openai provider (api_key_env is the NAME of the
+# env var holding the key, never the key itself):
+#
+# OpenAI:
+#   llm:
+#     provider: openai
+#     model: gpt-4o
+#     api_key_env: OPENAI_API_KEY
+#
+# DeepSeek:
+#   llm:
+#     provider: openai
+#     model: deepseek-chat
+#     base_url: https://api.deepseek.com
+#     api_key_env: DEEPSEEK_API_KEY
+#
+# Ollama (local):
+#   llm:
+#     provider: openai
+#     model: llama3.1
+#     base_url: http://localhost:11434/v1
+#     api_key_env: OLLAMA_API_KEY
 
 # SQLite database path.                      env: OVERMIND_DB_PATH
 db_path: ~/.overmind/overmind.db
