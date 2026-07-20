@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -73,12 +74,15 @@ func TestResumeCrashBeforeCreateSession(t *testing.T) {
 	}
 }
 
-// TestRunLockContention: while another pid holds a FRESH run lock, om run
-// must refuse to start; after the holder releases, it must succeed.
+// TestRunLockContention: while a LIVE pid holds a FRESH run lock, om run
+// must refuse to start; after the holder releases, it must succeed. The
+// holder is this test process itself so the liveness check sees it alive
+// (dead holders are taken over — covered by store.TestRunLockDeadHolder).
 func TestRunLockContention(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
 	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
-	if err := st.AcquireRunLock("plan-1", 999, s.Cfg.withDefaults().LockStaleAfter); err != nil {
+	holder := int64(os.Getpid())
+	if _, err := st.AcquireRunLock("plan-1", holder, s.Cfg.withDefaults().LockStaleAfter); err != nil {
 		t.Fatalf("seed lock: %v", err)
 	}
 	err := s.Run(context.Background(), "plan-1")
@@ -88,7 +92,7 @@ func TestRunLockContention(t *testing.T) {
 	if got := planStatus(t, st); got != store.PlanApproved {
 		t.Fatalf("plan status after refused run = %s, want approved", got)
 	}
-	if err := st.ReleaseRunLock("plan-1", 999); err != nil {
+	if err := st.ReleaseRunLock("plan-1", holder); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	if err := s.Run(context.Background(), "plan-1"); err != nil {

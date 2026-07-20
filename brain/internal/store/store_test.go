@@ -251,14 +251,18 @@ func TestBrainEventsAppendOnly(t *testing.T) {
 func TestRunLock(t *testing.T) {
 	s := openTestStore(t)
 	mustCreatePlan(t, s, "p1", nt("a"))
+	// All holders are "alive" here; dead-holder takeover has its own test.
+	orig := pidAlive
+	pidAlive = func(int64) bool { return true }
+	t.Cleanup(func() { pidAlive = orig })
 	stale := time.Minute
-	if err := s.AcquireRunLock("p1", 100, stale); err != nil {
+	if _, err := s.AcquireRunLock("p1", 100, stale); err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	if err := s.AcquireRunLock("p1", 200, stale); err == nil {
-		t.Fatal("second om run must be rejected while lock is fresh")
+	if _, err := s.AcquireRunLock("p1", 200, stale); err == nil {
+		t.Fatal("second om run must be rejected while lock is fresh and holder alive")
 	}
-	if err := s.AcquireRunLock("p1", 100, stale); err != nil {
+	if _, err := s.AcquireRunLock("p1", 100, stale); err != nil {
 		t.Fatalf("re-acquire by same pid: %v", err)
 	}
 	if err := s.HeartbeatRunLock("p1", 100); err != nil {
@@ -267,14 +271,52 @@ func TestRunLock(t *testing.T) {
 	if err := s.HeartbeatRunLock("p1", 200); err == nil {
 		t.Fatal("heartbeat by non-holder should fail")
 	}
-	// Stale lock can be stolen.
-	if err := s.AcquireRunLock("p1", 200, -time.Second); err != nil {
+	// Stale lock can be stolen even from a live holder.
+	if _, err := s.AcquireRunLock("p1", 200, -time.Second); err != nil {
 		t.Fatalf("steal stale lock: %v", err)
 	}
 	if err := s.ReleaseRunLock("p1", 200); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if err := s.AcquireRunLock("p1", 300, stale); err != nil {
+	if _, err := s.AcquireRunLock("p1", 300, stale); err != nil {
 		t.Fatalf("acquire after release: %v", err)
+	}
+}
+
+// TestRunLockDeadHolder: a FRESH lock whose holder process is dead must be
+// taken over immediately (kill -9 leaves the row behind; found live in the
+// OM-6b E2E run 3: stale lock blocked resume until the heartbeat aged out).
+func TestRunLockDeadHolder(t *testing.T) {
+	s := openTestStore(t)
+	mustCreatePlan(t, s, "p1", nt("a"))
+	orig := pidAlive
+	t.Cleanup(func() { pidAlive = orig })
+	stale := time.Minute
+
+	pidAlive = func(int64) bool { return true }
+	if _, err := s.AcquireRunLock("p1", 100, stale); err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
+
+	// Holder alive -> reject.
+	if _, err := s.AcquireRunLock("p1", 200, stale); err == nil {
+		t.Fatal("live holder with fresh heartbeat must reject")
+	}
+
+	// Holder dead -> take over, tookOver=true.
+	pidAlive = func(int64) bool { return false }
+	tookOver, err := s.AcquireRunLock("p1", 200, stale)
+	if err != nil {
+		t.Fatalf("takeover from dead holder: %v", err)
+	}
+	if !tookOver {
+		t.Fatal("tookOver = false, want true when stealing from dead holder")
+	}
+	p, err := s.GetPlan("p1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if p.RunLockPID == nil || *p.RunLockPID != 200 {
+		t.Fatalf("lock holder = %v, want 200", p.RunLockPID)
 	}
 }

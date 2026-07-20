@@ -38,8 +38,12 @@ func (s *Scheduler) Run(ctx context.Context, planID string) error {
 	if st.PlanStatus != store.PlanApproved && st.PlanStatus != store.PlanRunning {
 		return fmt.Errorf("plan %s is %s; om run needs an approved (or interrupted running) plan", planID, st.PlanStatus)
 	}
-	if err := sc.St.AcquireRunLock(planID, sc.PID, sc.Cfg.LockStaleAfter); err != nil {
+	tookOver, err := sc.St.AcquireRunLock(planID, sc.PID, sc.Cfg.LockStaleAfter)
+	if err != nil {
 		return err
+	}
+	if tookOver {
+		sc.logf("plan %s: previous om run holder is dead — taking over its run lock", planID)
 	}
 	defer sc.St.ReleaseRunLock(planID, sc.PID)
 	repo, defBranch, err := sc.resolveRepo(ctx, plan.ProjectID)

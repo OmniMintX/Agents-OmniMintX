@@ -1,41 +1,72 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"syscall"
 	"time"
 )
 
 // Advisory run lock: prevents two `om run` processes on the same plan.
 // A lock is stale (and can be stolen) when its heartbeat is older than
-// staleAfter; the holder must call HeartbeatRunLock periodically.
+// staleAfter OR its holder process is no longer alive (kill -9 leaves the
+// row behind; without the liveness check a dead holder blocks resume for
+// the whole staleAfter window).
+
+// pidAlive reports whether a process with the given pid exists. Variable
+// so tests can force both branches deterministically. EPERM means the
+// process exists but belongs to another user — treat as alive.
+var pidAlive = func(pid int64) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(int(pid), 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 
 // AcquireRunLock claims the plan's run lock for pid. It succeeds when the
-// lock is free or stale; otherwise it returns an error naming the holder.
-func (s *Store) AcquireRunLock(planID string, pid int64, staleAfter time.Duration) error {
+// lock is free, stale, or held by a dead process; otherwise it returns an
+// error naming the holder. tookOver=true means the lock was stolen from a
+// holder whose process is dead (caller should log a warning).
+func (s *Store) AcquireRunLock(planID string, pid int64, staleAfter time.Duration) (tookOver bool, err error) {
 	cutoff := time.Now().UTC().Add(-staleAfter).Format(timeFormat)
 	res, err := s.db.Exec(
 		`UPDATE plans SET run_lock_pid = ?, run_lock_heartbeat_at = ?
 		 WHERE id = ? AND (run_lock_pid IS NULL OR run_lock_pid = ? OR run_lock_heartbeat_at < ?)`,
 		pid, now(), planID, pid, cutoff)
 	if err != nil {
-		return err
+		return false, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n == 0 {
 		p, gerr := s.GetPlan(planID)
 		if gerr != nil {
-			return fmt.Errorf("run lock busy on plan %s", planID)
+			return false, fmt.Errorf("run lock busy on plan %s", planID)
 		}
 		holder := int64(0)
 		if p.RunLockPID != nil {
 			holder = *p.RunLockPID
 		}
-		return fmt.Errorf("plan %s is locked by another om run (pid %d)", planID, holder)
+		if holder != 0 && !pidAlive(holder) {
+			// Holder is dead: steal the lock (CAS on the holder pid so two
+			// concurrent stealers cannot both win).
+			res, err := s.db.Exec(
+				`UPDATE plans SET run_lock_pid = ?, run_lock_heartbeat_at = ?
+				 WHERE id = ? AND run_lock_pid = ?`,
+				pid, now(), planID, holder)
+			if err != nil {
+				return false, err
+			}
+			if sn, err := res.RowsAffected(); err == nil && sn == 1 {
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("plan %s is locked by another om run (pid %d)", planID, holder)
 	}
-	return nil
+	return false, nil
 }
 
 // HeartbeatRunLock refreshes the heartbeat; fails if pid no longer holds it.
