@@ -153,9 +153,27 @@ cần `ANTHROPIC_API_KEY` nữa (đã cập nhật mục GATE ở trên).
    dung "failure: ..." vẫn thành done. Đề xuất: định dạng marker có cấu trúc
    (vd dòng đầu `ok|fail`) — cần sửa cả prompt.tmpl lẫn scheduler, để bàn.
 3. **Permission prompts của claude-code**: mỗi Bash/Write đều needs_input; Overmind
-   pause timeout đúng thiết kế nhưng E2E cần người bấm approve trong tmux
-   (`--dangerously-skip-permissions` hoặc settings allowlist là việc của AO/harness,
-   ngoài scope Overmind).
+   pause timeout đúng thiết kế nhưng E2E cần người bấm approve trong tmux.
+   Phân tích đường truyền permission (từ source AO trong docs/repo/, verify live
+   trên daemon 0.10.3) — input cho Phase 2:
+   - `POST /api/v1/sessions` (SpawnSessionRequest) KHÔNG có field permissions —
+     xác nhận lại kết luận grep trước: không truyền được cờ per-spawn.
+   - NHƯNG AO có cấu hình per-project: `PUT /api/v1/projects/{id}/config` với
+     `{"config":{"agentConfig":{"permissions":"accept-edits|auto|bypass-permissions"}}}`
+     (domain.ProjectConfig.AgentConfig + role override `worker.agentConfig`).
+     Session manager resolve config này TẠI spawn (`effectiveAgentConfig`), adapter
+     claude-code map thành `--permission-mode acceptEdits|auto|bypassPermissions`
+     (bypass ≡ `--dangerously-skip-permissions`). Đã verify live: PUT trả 200 và
+     config persist. → Phương án (a) KHẢ THI: Overmind set project config 1 lần
+     khi đăng ký project; session spawn sau đó tự có flag, không cần người bấm.
+   - Phương án (b) cũng khả thi: commit `.claude/settings.json` với
+     `permissions.allow` vào repo dự án — worktree AO thừa hưởng theo repo.
+     Nhược: đổi nội dung repo của user, allowlist phải liệt kê từng tool/pattern.
+   - Đề xuất Phase 2: (a) là chính — Overmind PUT `worker.agentConfig.permissions`
+     = `accept-edits` (đủ cho edit+safe bash, vẫn chặn network/system bash) hoặc
+     `auto`; `bypass-permissions` chỉ khi user opt-in rõ ràng. (b) làm fallback
+     cho harness không hỗ trợ permission-mode. Lưu ý: config áp dụng cho session
+     spawn MỚI, không ảnh hưởng session đang chạy.
 4. AO daemon chết giữa chừng 1 lần (trước khi plan p-a246ce32 được tạo);
    `open -a "Agent Orchestrator"` + poll HTTP khôi phục trong ~2s. Overmind báo lỗi
    rõ ràng, không hỏng state.
