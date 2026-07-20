@@ -10,8 +10,9 @@ Kịch bản chạy tay từng bước + kết quả kỳ vọng, và nhật ký
      Nếu daemon chết: `open -a "Agent Orchestrator"` rồi poll lại endpoint trên.
    - Lưu ý: `running.json` có thể STALE (pid đã chết nhưng file còn) → luôn kiểm tra
      bằng HTTP, không tin file.
-2. `ANTHROPIC_API_KEY` có trong env (planner gọi Anthropic Messages API trực tiếp;
-   thiếu key → `om plan` fail với "anthropic: API key is empty").
+2. Planner LLM: mặc định dùng `claude` CLI (`provider=cli`) — chỉ cần `which claude`
+   trả về binary. KHÔNG cần `ANTHROPIC_API_KEY` trong env; chỉ cần key khi cấu hình
+   `provider=anthropic` (gọi Messages API trực tiếp).
 3. Build om: `cd brain && go build -o /tmp/om ./cmd/om`.
 
 ## Kịch bản chính (A→B dependency chaining)
@@ -86,3 +87,75 @@ không được tạo session trùng (adopt theo displayName marker).
 - Run-file stale: AO app không dọn `running.json` khi daemon chết. Overmind đã xử lý
   đúng hướng (connection refused = ErrDaemonNotRunning → backoff, không fail plan),
   nhưng doc/e2e phải luôn verify bằng HTTP thay vì tin run-file.
+
+---
+
+## Nhật ký chạy thật — lần 2, 2026-07-20 → 21 (AO 0.10.3, planner cli/claude)
+
+**Verdict: FAIL** — pipeline Overmind chạy hết A→B và plan "done", nhưng
+**chaining VỠ đúng như RISK dự đoán**: B không thấy code của A. Chi tiết dưới.
+
+Provider/model: planner `provider=cli` (binary `claude`); worker harness
+`claude-code` qua AO. AO daemon 0.10.3, port 3001.
+
+### Unblock API key — DONE
+Planner thêm `provider=cli` gọi `claude` CLI thay vì Messages API → GATE không
+cần `ANTHROPIC_API_KEY` nữa (đã cập nhật mục GATE ở trên).
+
+### Bug Overmind phát hiện & fix trong lần 2 (đều có unit test, go test -race sạch)
+1. **Completion detection vỡ trên AO 0.10.3**: Overmind kiểm `.om-done` qua
+   `GET /sessions/{id}/workspace/files` nhưng AO 0.10.3 KHÔNG có route đó
+   (ROUTE_NOT_FOUND) → task xong việc mà Overmind không bao giờ thấy marker.
+   Fix: `aoclient.PreviewFile` (route `/preview/files/{path}` — có thật, chính là
+   `previewUrl` AO trả về) + scheduler fallback khi listing 404. Test:
+   `TestPreviewFile*` (aoclient), `TestRunDoneMarkerPreviewFallback` (scheduler).
+2. **Task id không plan-scoped trong SQLite**: planner sinh `t1..tN` cho MỌI plan,
+   nhưng `tasks.id` là PK toàn cục → plan thứ 2 trở đi fail
+   "UNIQUE constraint failed: tasks.id". `task_dependencies` cũng dính PK
+   `(task_id, depends_on_task_id)` không có plan_id. Fix: PK composite
+   `(id, plan_id)` / `(plan_id, task_id, depends_on_task_id)` + migration rebuild
+   tables cho DB cũ (`migrateTasksPK`, chạy trong `store.Open`). Test:
+   `TestCreatePlanReusesTaskIDsAcrossPlans`, `TestMigrateTasksPK`.
+
+### Kịch bản chính A→B — plan p-a246ce32 (00:01→00:05, ~4 phút)
+- t1 (om-e2e-1784566150-2): tạo `greeting.txt`, commit a71108c trên branch
+  `ao/om-e2e-1784566150-2/root`, tạo `.om-done`. Overmind detect qua fallback
+  preview → `task t1: DONE (pr: )` — **PR rỗng**.
+- **AO worker KHÔNG tự mở PR** (câu hỏi RISK — trả lời thực nghiệm: KHÔNG).
+  Session không có PR nào; AO 0.10.3 cũng không có API tạo PR cho session
+  (`/sessions/{id}/prs` = ROUTE_NOT_FOUND). Repo local không có remote → không
+  thể có PR đúng nghĩa.
+- Hệ quả: `ensureParentsMerged` thấy 0 PR → coi như "đã merge" → dispatch t2 từ
+  `main` (chỉ có README). t2 (om-e2e-1784566150-3) báo đúng sự thật:
+  "greeting.txt is not in my worktree, but it exists on sibling branches",
+  không tạo `reply.txt`, ghi `.om-done` nội dung **failure**.
+- **Overmind vẫn kết luận `task t2: DONE` và `plan done`** vì tiêu chí done chỉ là
+  "idle + tồn tại .om-done", không đọc nội dung marker. `main` cuối cùng KHÔNG có
+  `greeting.txt` lẫn `reply.txt` → E2E chaining **FAIL**, không phải "xanh giả".
+- Timeline events đầy đủ đúng thứ tự: plan_created→approved→run_started→
+  dispatching/dispatched→needs_human×2 (permission prompts)→resumed→done×2→plan_done.
+
+### Kịch bản phụ resume — plan p-5fd37286: PASS
+- `om run` bị kill -9 giữa lúc t1 needs_input → chạy lại.
+- Lần chạy lại đầu trong <60s bị chặn đúng: "plan p-5fd37286 is locked by another
+  om run (pid 73985)" (lock stale sau 60s — by design, không phải bug).
+- Sau 60s: run mới adopt lại session `om-e2e-1784566150-4` theo displayName marker,
+  **không tạo session trùng** (count sessions của project giữ nguyên 4), resume
+  needs_input → done. Events cho thấy 2 run_started nhưng chỉ 1 task_dispatched.
+
+### Phát hiện quan trọng (không fix — lỗi thiết kế, cần quyết định)
+1. **PR-chaining VỠ trên AO 0.10.3 + repo local**: worker không mở PR, AO không có
+   API PR per-session, repo không remote. `ensureParentsMerged` coi 0 PR = merged
+   là sai với thực tế này. Đề xuất: (a) dispatch task con với base = branch của
+   cha (`ao/{parent-session}/root`) thay vì default branch, hoặc (b) scheduler tự
+   merge branch cha vào main local trước khi dispatch con. Cần quyết định thiết kế.
+2. **"done" quá dễ dãi**: chỉ cần idle + `.om-done` tồn tại. Agent ghi marker nội
+   dung "failure: ..." vẫn thành done. Đề xuất: định dạng marker có cấu trúc
+   (vd dòng đầu `ok|fail`) — cần sửa cả prompt.tmpl lẫn scheduler, để bàn.
+3. **Permission prompts của claude-code**: mỗi Bash/Write đều needs_input; Overmind
+   pause timeout đúng thiết kế nhưng E2E cần người bấm approve trong tmux
+   (`--dangerously-skip-permissions` hoặc settings allowlist là việc của AO/harness,
+   ngoài scope Overmind).
+4. AO daemon chết giữa chừng 1 lần (trước khi plan p-a246ce32 được tạo);
+   `open -a "Agent Orchestrator"` + poll HTTP khôi phục trong ~2s. Overmind báo lỗi
+   rõ ràng, không hỏng state.
