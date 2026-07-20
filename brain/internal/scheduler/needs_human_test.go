@@ -25,7 +25,7 @@ func TestRunNeedsHumanEscalatesThenResumes(t *testing.T) {
 		sessStep{status: aoclient.StatusWorking},
 		sessStep{status: aoclient.StatusIdle, marker: true, pr: 7},
 	)
-	ao.scripts[displayNameFor("a1234567")] = script
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = script
 
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -69,7 +69,7 @@ func TestRunChangesRequestedIsNeedsHuman(t *testing.T) {
 		script = append(script, sessStep{status: aoclient.StatusChangesRequested})
 	}
 	script = append(script, sessStep{status: aoclient.StatusMerged})
-	ao.scripts[displayNameFor("a1234567")] = script
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = script
 
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -103,7 +103,7 @@ func TestRunFailedDependencyBlocksChild(t *testing.T) {
 		nt("a1234567"), nt("b1234567", "a1234567"),
 	}, Config{})
 	// Parent terminates without the marker -> failed.
-	ao.scripts[displayNameFor("a1234567")] = []sessStep{
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
 		{status: aoclient.StatusWorking},
 		{status: aoclient.StatusTerminated},
 	}

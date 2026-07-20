@@ -68,9 +68,9 @@ func TestRunDAGOrder(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{
 		nt("a1234567"), nt("b1234567", "a1234567"), nt("c1234567", "b1234567"),
 	}, Config{})
-	ao.scripts[displayNameFor("a1234567")] = doneScript(1)
-	ao.scripts[displayNameFor("b1234567")] = doneScript(2)
-	ao.scripts[displayNameFor("c1234567")] = doneScript(3)
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(1)
+	ao.scripts[displayNameFor("plan-1", "b1234567")] = doneScript(2)
+	ao.scripts[displayNameFor("plan-1", "c1234567")] = doneScript(3)
 
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -89,7 +89,11 @@ func TestRunDAGOrder(t *testing.T) {
 			order = append(order, e)
 		}
 	}
-	want := []string{"create:om-a1234567", "merge:1", "create:om-b1234567", "merge:2", "create:om-c1234567", "merge:3"}
+	want := []string{
+		"create:" + displayNameFor("plan-1", "a1234567"), "merge:1",
+		"create:" + displayNameFor("plan-1", "b1234567"), "merge:2",
+		"create:" + displayNameFor("plan-1", "c1234567"), "merge:3",
+	}
 	if len(order) != len(want) {
 		t.Fatalf("event order = %v, want %v", order, want)
 	}
@@ -106,7 +110,7 @@ func TestRunMaxParallel(t *testing.T) {
 	tasks := []store.NewTask{nt("a1234567"), nt("b1234567"), nt("c1234567"), nt("d1234567")}
 	st, ao, s := newHarness(t, tasks, Config{MaxParallel: 2})
 	for _, tk := range tasks {
-		ao.scripts[displayNameFor(tk.ID)] = doneScript(0)
+		ao.scripts[displayNameFor("plan-1", tk.ID)] = doneScript(0)
 	}
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -127,6 +131,31 @@ func TestRunEmptyPlanIsDone(t *testing.T) {
 	}
 	if got := planStatus(t, st); got != store.PlanDone {
 		t.Fatalf("plan status = %s, want done", got)
+	}
+}
+
+// TestDisplayNameFor: the marker must be deterministic, plan-scoped (same
+// task id in different plans must NOT collide — planner ids are t1..tN),
+// and within AO's 20-rune displayName cap.
+func TestDisplayNameFor(t *testing.T) {
+	a := displayNameFor("p-aaaa1111", "t1")
+	b := displayNameFor("p-bbbb2222", "t1")
+	if a == b {
+		t.Fatalf("same task id across plans collided: %s", a)
+	}
+	if a != displayNameFor("p-aaaa1111", "t1") {
+		t.Fatalf("displayNameFor is not deterministic")
+	}
+	if c := displayNameFor("p-aaaa1111", "t2"); c == a {
+		t.Fatalf("different task ids in one plan collided: %s", c)
+	}
+	for _, n := range []string{a, b} {
+		if !strings.HasPrefix(n, "om-") {
+			t.Fatalf("displayName %q must start with om-", n)
+		}
+		if len(n) != len("om-")+8 {
+			t.Fatalf("displayName %q length = %d, want %d", n, len(n), len("om-")+8)
+		}
 	}
 }
 

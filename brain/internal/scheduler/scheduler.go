@@ -4,8 +4,8 @@
 //
 // Rules locked after the 07/2026 red-team review:
 //   - Idempotent dispatch: task_dispatching (intent) is recorded BEFORE the
-//     CreateSession HTTP call; displayName "om-"+task_id[:8] is the
-//     idempotency marker checked against ListSessions on resume.
+//     CreateSession HTTP call; displayName "om-"+hash(plan_id,task_id)[:8]
+//     is the idempotency marker checked against ListSessions on resume.
 //   - "Done" = idle session with the .om-done marker file; its PRs are then
 //     merged (merge-before-dispatch keeps children able to see parent code).
 //   - needs_input/changes_requested = NEEDS_HUMAN: escalate, stop the
@@ -17,6 +17,7 @@ package scheduler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -119,14 +120,14 @@ func newRunID() string {
 }
 
 // displayNameFor builds the AO session display name that doubles as the
-// idempotent-dispatch marker: "om-" + first 8 chars of the task id
-// (max 11 runes, well under AO's 20-rune cap).
-func displayNameFor(taskID string) string {
-	id := taskID
-	if len(id) > 8 {
-		id = id[:8]
-	}
-	return "om-" + id
+// idempotent-dispatch marker: "om-" + first 8 hex chars of
+// sha256(planID, taskID). Planner task ids are sequential (t1..tN), so the
+// plan id must participate or plans in the same project would collide and
+// resume could adopt another plan's session. Always 11 runes, under AO's
+// 20-rune cap.
+func displayNameFor(planID, taskID string) string {
+	sum := sha256.Sum256([]byte(planID + "\x00" + taskID))
+	return "om-" + hex.EncodeToString(sum[:4])
 }
 
 // isTransport reports whether err means "the AO daemon is unreachable"

@@ -15,7 +15,7 @@ import (
 // finish the plan once AO is back — never failing plan or task.
 func TestRunAODownMidRun(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
-	ao.scripts[displayNameFor("a1234567")] = []sessStep{
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
 		{status: aoclient.StatusWorking},
 		{status: aoclient.StatusWorking},
 		{status: aoclient.StatusIdle, marker: true},
@@ -56,7 +56,7 @@ func TestRunAODownMidRun(t *testing.T) {
 func TestRunIdleNoMarkerTimeout(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")},
 		Config{TaskTimeout: time.Minute, PollInterval: 15 * time.Second})
-	ao.scripts[displayNameFor("a1234567")] = []sessStep{
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{
 		{status: aoclient.StatusIdle}, // idle forever, no marker
 	}
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
@@ -97,7 +97,7 @@ func TestRunIdleNoMarkerTimeout(t *testing.T) {
 func TestRunStuckWorkingTimeout(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")},
 		Config{TaskTimeout: time.Minute, PollInterval: 15 * time.Second})
-	ao.scripts[displayNameFor("a1234567")] = []sessStep{{status: aoclient.StatusWorking}}
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{{status: aoclient.StatusWorking}}
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRunStuckWorkingTimeout(t *testing.T) {
 func TestRunNoSignalTimeout(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")},
 		Config{NoSignalTimeout: 30 * time.Second, PollInterval: 15 * time.Second})
-	ao.scripts[displayNameFor("a1234567")] = []sessStep{{status: aoclient.StatusNoSignal}}
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = []sessStep{{status: aoclient.StatusNoSignal}}
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

@@ -48,7 +48,7 @@ func (r *runner) reconcileDispatching(ctx context.Context, t store.Task) error {
 	if err != nil {
 		return err
 	}
-	want := displayNameFor(t.ID)
+	want := displayNameFor(r.plan.ID, t.ID)
 	var match *aoclient.Session
 	for i := range sessions {
 		s := &sessions[i]
@@ -127,7 +127,7 @@ func (r *runner) createAndDispatch(ctx context.Context, t store.Task) error {
 		Kind:        "worker",
 		Harness:     aoclient.Harness(t.Harness),
 		Prompt:      t.Prompt,
-		DisplayName: displayNameFor(t.ID),
+		DisplayName: displayNameFor(r.plan.ID, t.ID),
 	})
 	if err != nil {
 		if isTransport(err) {

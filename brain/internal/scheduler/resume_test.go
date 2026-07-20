@@ -21,7 +21,7 @@ func TestResumeCrashAfterCreateSession(t *testing.T) {
 	if err := st.MarkTaskDispatching("plan-1", "a1234567", "run-crashed"); err != nil {
 		t.Fatalf("MarkTaskDispatching: %v", err)
 	}
-	ao.addSession(displayNameFor("a1234567"), false, doneScript(0))
+	ao.addSession(displayNameFor("plan-1", "a1234567"), false, doneScript(0))
 
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -54,7 +54,7 @@ func TestResumeCrashBeforeCreateSession(t *testing.T) {
 	if err := st.MarkTaskDispatching("plan-1", "a1234567", "run-crashed"); err != nil {
 		t.Fatalf("MarkTaskDispatching: %v", err)
 	}
-	ao.scripts[displayNameFor("a1234567")] = doneScript(0)
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
 
 	if err := s.Run(context.Background(), "plan-1"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -77,7 +77,7 @@ func TestResumeCrashBeforeCreateSession(t *testing.T) {
 // must refuse to start; after the holder releases, it must succeed.
 func TestRunLockContention(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
-	ao.scripts[displayNameFor("a1234567")] = doneScript(0)
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
 	if err := st.AcquireRunLock("plan-1", 999, s.Cfg.withDefaults().LockStaleAfter); err != nil {
 		t.Fatalf("seed lock: %v", err)
 	}
