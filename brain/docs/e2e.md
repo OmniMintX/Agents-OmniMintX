@@ -177,3 +177,76 @@ cần `ANTHROPIC_API_KEY` nữa (đã cập nhật mục GATE ở trên).
 4. AO daemon chết giữa chừng 1 lần (trước khi plan p-a246ce32 được tạo);
    `open -a "Agent Orchestrator"` + poll HTTP khôi phục trong ~2s. Overmind báo lỗi
    rõ ràng, không hỏng state.
+
+
+---
+
+## Nhật ký chạy thật — lần 3, 2026-07-21 (AO 0.10.3, om build 65242f4)
+
+**Verdict: PASS** — chaining sống thật: local merge hoạt động, B đọc được file
+của A từ `main`; marker có cấu trúc phân biệt được ok/fail; resume adopt không
+dispatch trùng. Chi tiết + caveat bên dưới.
+
+Thiết kế được verify: local git merge thay PR (gitops.Merger), marker
+`.om-done.<hex8>` + honesty footer inject lúc dispatch, verdict 5 nhánh,
+`.claude/settings.json` autonomy commit sẵn vào repo test.
+
+### Hiện trường cũ p-f55373e1 (repo 1784570341): FAIL — no_signal
+- t1 dispatch xong nhưng session kẹt ở dialog "This folder pre-approves 11 tool
+  permissions… Do you trust?" của claude-code (dialog TRUST FOLDER do chính
+  `.claude/settings.json` gây ra, xuất hiện TRƯỚC cả prompt đầu tiên).
+- Không ai bấm → `no_signal` >10m → scheduler kill session + task_failed
+  `kind=no_signal` + plan_failed. Đúng thiết kế timeout, nhưng hiện trường
+  không cứu được (session terminated) → làm lại repo mới.
+- Phát hiện phụ: process `om run` (pid 92677) SỐNG SÓT khi terminal cha chết;
+  lock plan theo pid chặn đúng run thứ 2 ("locked by another om run").
+
+### Kịch bản chính A→B — plan p-0359a657 (repo /tmp/om-e2e-1784571147): PASS
+- Repo mới: `.claude/settings.json` (acceptEdits + allowlist + deny) commit
+  TRƯỚC khi plan. Plan t1→t2, approve, `om run`.
+- t1 (om-e2e-1784571147-1): vẫn kẹt trust-folder dialog → needs_human; bấm
+  Enter thủ công trong tmux 1 lần → resumed. Sau đó agent chạy `xxd` (không có
+  trong allowlist) → thêm 1 prompt approval nữa (bấm "don't ask again for xxd").
+  Agent commit `greeting.txt` (d0dac6f), ghi marker `.om-done.e4cc4a97` nội dung
+  `ok: …` (honesty footer hiển thị đúng trong system prompt của worker — thấy
+  nguyên văn trong tmux).
+- Scheduler: verdict ok → **local merge** `ao/…-1/root` vào main (08ea152,
+  event `task_branch_merged`) → FinishTask → dispatch t2.
+- t2 (om-e2e-1784571147-2): chạy **không cần bấm gì** (trust đã có, không dùng
+  lệnh ngoài allowlist). Đọc được `greeting.txt` từ main thật, tạo `reply.txt`
+  = `reply to: hello-om-e2e-1784571147` (TRÍCH đúng nội dung A), commit, marker
+  `ok:` → merge 113dac5 → plan done.
+- Verify: `git show main:greeting.txt` = `hello-om-e2e-1784571147`;
+  `git show main:reply.txt` = `reply to: hello-om-e2e-1784571147`. Events đúng
+  thứ tự: …→task_branch_merged(t1)→task_done(t1)→dispatched(t2)→
+  task_branch_merged(t2)→task_done(t2)→plan_done. Payload task_done giờ có
+  `{"marker":"ok","summary":…}`.
+
+### Kịch bản fail thật — plan p-b532813d: PASS
+- Goal: task PHẢI báo fail (đọc `/nonexistent-xyz-e2e`, không được tạo file).
+- Agent ghi marker `fail: /nonexistent-xyz-e2e does not exist; out.txt not
+  written` → scheduler: task_failed `kind=marker_fail` kèm `marker_content`,
+  **KHÔNG merge** (branch `ao/…-3/root` vẫn trỏ main cũ, không có event
+  task_branch_merged), main không đổi (113dac5 trước == sau). Plan failed.
+- Đây chính là lỗ hổng "xanh giả" của lần 2 — giờ bị chặn đúng.
+
+### Kịch bản resume — plan p-fe1fb0e3: PASS
+- Run 1 (run-d58840548e4a) dispatch t1 (session om-e2e-1784571147-4), chết giữa
+  lúc t1 needs_input. Run 2 (run-e8c5f0ae8188) **adopt** session theo
+  displayName: events có 2 `run_started` nhưng chỉ 1 `task_dispatched`,
+  session count của project giữ nguyên (không spawn trùng). Resume → marker ok
+  → merge 712d248 → done.
+
+### Phát hiện quan trọng lần 3
+1. **Trust-folder dialog là needs_input mới**: chính `.claude/settings.json`
+   (giải pháp autonomy) lại sinh ra dialog "do you trust this folder" ở lần
+   spawn đầu trong worktree mới → t1 của mỗi plan đầu vẫn cần 1 lần bấm tay.
+   Sau khi trust, các session sau trong CÙNG repo không hỏi lại (t2 chạy sạch).
+   → Phase 2 nên dùng phương án PUT project config `worker.agentConfig
+   .permissions` (đã verify lần 2) thay vì/kết hợp settings.json.
+2. **Allowlist không đủ**: agent tự chọn lệnh ngoài allowlist (`xxd`) → vẫn
+   prompt. acceptEdits chỉ cover Write/Edit; bash lạ luôn hỏi. Không coi
+   allowlist tĩnh là đủ cho autonomy.
+3. **Chuỗi merge-trước-dispatch hoạt động đúng như thiết kế**: verdict ok →
+   merge local → FinishTask → con dispatch từ main đã chứa code cha. Fail
+   marker → không merge, main sạch. Timeout no_signal kill đúng.
