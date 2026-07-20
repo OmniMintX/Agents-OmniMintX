@@ -19,8 +19,11 @@ CREATE TABLE IF NOT EXISTS plans (
     approved_at           TEXT
 );
 
+-- Task ids are PLAN-SCOPED (the planner reuses t1..tN in every plan), so the
+-- primary key must be composite. Databases created when `id` alone was the
+-- PK are rebuilt by migrateTasksPK (store.go).
 CREATE TABLE IF NOT EXISTS tasks (
-    id            TEXT PRIMARY KEY,
+    id            TEXT NOT NULL,
     plan_id       TEXT NOT NULL REFERENCES plans(id),
     title         TEXT NOT NULL,
     prompt        TEXT NOT NULL,
@@ -31,20 +34,20 @@ CREATE TABLE IF NOT EXISTS tasks (
     branch        TEXT,
     pr_url        TEXT,
     created_at    TEXT NOT NULL,
-    UNIQUE (id, plan_id)
+    PRIMARY KEY (id, plan_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_plan ON tasks(plan_id);
 
 -- Both endpoints must belong to the same plan (composite FKs forbid
--- cross-plan edges); UNIQUE PK forbids duplicate edges; CHECK forbids
--- self-dependency. Global acyclicity is validated by topo-sort in Go
--- when the plan is saved (CreatePlan).
+-- cross-plan edges); plan-scoped PK forbids duplicate edges without
+-- colliding across plans; CHECK forbids self-dependency. Global acyclicity
+-- is validated by topo-sort in Go when the plan is saved (CreatePlan).
 CREATE TABLE IF NOT EXISTS task_dependencies (
     plan_id            TEXT NOT NULL,
     task_id            TEXT NOT NULL,
     depends_on_task_id TEXT NOT NULL,
-    PRIMARY KEY (task_id, depends_on_task_id),
+    PRIMARY KEY (plan_id, task_id, depends_on_task_id),
     CHECK (task_id <> depends_on_task_id),
     FOREIGN KEY (task_id, plan_id) REFERENCES tasks(id, plan_id),
     FOREIGN KEY (depends_on_task_id, plan_id) REFERENCES tasks(id, plan_id)

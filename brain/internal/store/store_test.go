@@ -61,6 +61,80 @@ func TestCreatePlanAndGetters(t *testing.T) {
 	}
 }
 
+// TestCreatePlanReusesTaskIDsAcrossPlans: the planner emits t1..tN in every
+// plan, so a second plan with the same task ids must not collide (found live
+// in the OM-6 E2E run: "UNIQUE constraint failed: tasks.id").
+func TestCreatePlanReusesTaskIDsAcrossPlans(t *testing.T) {
+	s := openTestStore(t)
+	mustCreatePlan(t, s, "p1", nt("t1"), nt("t2", "t1"))
+	mustCreatePlan(t, s, "p2", nt("t1"), nt("t2", "t1"))
+
+	for _, planID := range []string{"p1", "p2"} {
+		tasks, err := s.GetTasks(planID)
+		if err != nil || len(tasks) != 2 {
+			t.Fatalf("plan %s: want 2 tasks, got %d (err %v)", planID, len(tasks), err)
+		}
+	}
+}
+
+// TestMigrateTasksPK: a database created when tasks.id alone was the primary
+// key must be rebuilt on Open so plan-scoped ids work, keeping existing rows.
+func TestMigrateTasksPK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// Recreate the v1 layout (global PK on id) with one plan already stored.
+	stmts := []string{
+		`DROP TABLE task_dependencies`,
+		`DROP TABLE tasks`,
+		`CREATE TABLE tasks (
+		    id            TEXT PRIMARY KEY,
+		    plan_id       TEXT NOT NULL REFERENCES plans(id),
+		    title         TEXT NOT NULL,
+		    prompt        TEXT NOT NULL,
+		    harness       TEXT NOT NULL,
+		    status        TEXT NOT NULL DEFAULT 'pending'
+		        CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','done','failed')),
+		    ao_session_id TEXT,
+		    branch        TEXT,
+		    pr_url        TEXT,
+		    created_at    TEXT NOT NULL,
+		    UNIQUE (id, plan_id)
+		)`,
+		`CREATE TABLE task_dependencies (
+		    plan_id            TEXT NOT NULL,
+		    task_id            TEXT NOT NULL,
+		    depends_on_task_id TEXT NOT NULL,
+		    PRIMARY KEY (task_id, depends_on_task_id),
+		    CHECK (task_id <> depends_on_task_id),
+		    FOREIGN KEY (task_id, plan_id) REFERENCES tasks(id, plan_id),
+		    FOREIGN KEY (depends_on_task_id, plan_id) REFERENCES tasks(id, plan_id)
+		)`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("prepare old schema: %v", err)
+		}
+	}
+	mustCreatePlan(t, s, "p1", nt("t1"), nt("t2", "t1"))
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen (migration): %v", err)
+	}
+	t.Cleanup(func() { s2.Close() })
+	tasks, err := s2.GetTasks("p1")
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("after migration: want 2 tasks, got %d (err %v)", len(tasks), err)
+	}
+	mustCreatePlan(t, s2, "p2", nt("t1"), nt("t2", "t1"))
+}
+
 func TestGetReadyTasksProgression(t *testing.T) {
 	s := openTestStore(t)
 	mustCreatePlan(t, s, "p1", nt("a"), nt("b", "a"), nt("c", "a"), nt("d", "b", "c"))
