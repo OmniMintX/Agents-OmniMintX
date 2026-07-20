@@ -1,0 +1,28 @@
+# Overmind config template.
+# Copy to ~/.overmind/config.yaml and adjust.
+# Every field can be overridden by an OVERMIND_* env var (shown in comments).
+
+# AO daemon base URL (loopback).            env: OVERMIND_AO_BASE_URL
+ao_base_url: http://127.0.0.1:3001
+
+# Planner LLM settings.
+llm:
+  provider: anthropic                        # env: OVERMIND_LLM_PROVIDER
+  model: claude-sonnet-4-5                   # env: OVERMIND_LLM_MODEL
+  api_key_env: ANTHROPIC_API_KEY             # env: OVERMIND_LLM_API_KEY_ENV
+
+# SQLite database path.                      env: OVERMIND_DB_PATH
+db_path: ~/.overmind/overmind.db
+
+# Max sessions dispatched in parallel.       env: OVERMIND_MAX_PARALLEL
+max_parallel: 3
+
+# AO status poll interval (seconds).         env: OVERMIND_POLL_INTERVAL_SEC
+poll_interval_sec: 15
+
+# Per-task hard timeout (minutes).           env: OVERMIND_TASK_TIMEOUT_MIN
+task_timeout_min: 45
+
+# No-signal timeout before flagging a stalled task (minutes).
+# env: OVERMIND_NO_SIGNAL_TIMEOUT_MIN
+no_signal_timeout_min: 10

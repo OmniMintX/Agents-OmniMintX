@@ -1,0 +1,187 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+)
+
+// appendEvent inserts one append-only brain_events row inside tx.
+// taskID/runID may be empty; payload defaults to "{}".
+func appendEvent(tx *sql.Tx, planID, taskID, runID, eventType, payloadJSON string) error {
+	if payloadJSON == "" {
+		payloadJSON = "{}"
+	}
+	var taskVal any
+	if taskID != "" {
+		taskVal = taskID
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO brain_events (plan_id, task_id, run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		planID, taskVal, runID, eventType, payloadJSON, now(),
+	); err != nil {
+		return fmt.Errorf("append event %s: %w", eventType, err)
+	}
+	return nil
+}
+
+// transition appends an event and updates the matching cache column in
+// ONE transaction (the event-sourcing discipline).
+func (s *Store) planTransition(planID, runID, eventType, payloadJSON, cacheUpdate string, args ...any) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(cacheUpdate, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("plan %s: no row updated (unknown plan or invalid state)", planID)
+		}
+		return appendEvent(tx, planID, "", runID, eventType, payloadJSON)
+	})
+}
+
+// ApprovePlan: draft -> approved.
+func (s *Store) ApprovePlan(planID string) error {
+	return s.planTransition(planID, "", EventPlanApproved, "",
+		`UPDATE plans SET status = ?, approved_at = ? WHERE id = ? AND status = ?`,
+		PlanApproved, now(), planID, PlanDraft)
+}
+
+// StartRun records a new run (fresh runID per `om run`): approved|running -> running.
+func (s *Store) StartRun(planID, runID string) error {
+	return s.planTransition(planID, runID, EventRunStarted, "",
+		`UPDATE plans SET status = ? WHERE id = ? AND status IN (?, ?)`,
+		PlanRunning, planID, PlanApproved, PlanRunning)
+}
+
+// FinishPlan marks the plan done.
+func (s *Store) FinishPlan(planID, runID string) error {
+	return s.planTransition(planID, runID, EventPlanDone, "",
+		`UPDATE plans SET status = ? WHERE id = ? AND status = ?`,
+		PlanDone, planID, PlanRunning)
+}
+
+// FailPlan marks the plan failed. TERMINAL in Phase 1: retry = new plan.
+func (s *Store) FailPlan(planID, runID, payloadJSON string) error {
+	return s.planTransition(planID, runID, EventPlanFailed, payloadJSON,
+		`UPDATE plans SET status = ? WHERE id = ? AND status NOT IN (?, ?, ?)`,
+		PlanFailed, planID, PlanDone, PlanFailed, PlanCancelled)
+}
+
+// CancelPlan marks the plan cancelled.
+func (s *Store) CancelPlan(planID, runID string) error {
+	return s.planTransition(planID, runID, EventPlanCancelled, "",
+		`UPDATE plans SET status = ? WHERE id = ? AND status NOT IN (?, ?, ?)`,
+		PlanCancelled, planID, PlanDone, PlanFailed, PlanCancelled)
+}
+
+// taskTransition is the single-transaction event+cache update for tasks.
+func (s *Store) taskTransition(planID, taskID, runID, eventType, payloadJSON, cacheUpdate string, args ...any) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(cacheUpdate, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("task %s: no row updated (unknown task or invalid state)", taskID)
+		}
+		return appendEvent(tx, planID, taskID, runID, eventType, payloadJSON)
+	})
+}
+
+// MarkTaskDispatching records the dispatch INTENT (pending -> dispatching)
+// BEFORE the CreateSession HTTP call, so a crash between intent and
+// task_dispatched is detectable on resume (idempotent dispatch).
+func (s *Store) MarkTaskDispatching(planID, taskID, runID string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskDispatching, "",
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status = ?`,
+		TaskDispatching, taskID, planID, TaskPending)
+}
+
+// DispatchTask: dispatching -> dispatched, recording AO session + branch.
+func (s *Store) DispatchTask(planID, taskID, runID, aoSessionID, branch string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskDispatched, "",
+		`UPDATE tasks SET status = ?, ao_session_id = ?, branch = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?)`,
+		TaskDispatched, aoSessionID, branch, taskID, planID, TaskPending, TaskDispatching)
+}
+
+// StartTask: dispatched -> running.
+func (s *Store) StartTask(planID, taskID, runID string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskStarted, "",
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status = ?`,
+		TaskRunning, taskID, planID, TaskDispatched)
+}
+
+// MarkTaskNeedsHuman: dispatched|running -> needs_human. NOT a failure:
+// the timeout clock stops and om status escalates it to the user.
+func (s *Store) MarkTaskNeedsHuman(planID, taskID, runID, payloadJSON string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskNeedsHuman, payloadJSON,
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?)`,
+		TaskNeedsHuman, taskID, planID, TaskDispatched, TaskRunning)
+}
+
+// ResumeTask: needs_human -> running (a human unblocked the AO session).
+func (s *Store) ResumeTask(planID, taskID, runID string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskResumed, "",
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status = ?`,
+		TaskRunning, taskID, planID, TaskNeedsHuman)
+}
+
+// FinishTask: dispatched|running|needs_human -> done, with optional PR URL.
+func (s *Store) FinishTask(planID, taskID, runID, prURL string) error {
+	var pr any
+	if prURL != "" {
+		pr = prURL
+	}
+	return s.taskTransition(planID, taskID, runID, EventTaskDone, "",
+		`UPDATE tasks SET status = ?, pr_url = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?)`,
+		TaskDone, pr, taskID, planID, TaskDispatched, TaskRunning, TaskNeedsHuman)
+}
+
+// FailTask: dispatching|dispatched|running|needs_human -> failed.
+func (s *Store) FailTask(planID, taskID, runID, payloadJSON string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskFailed, payloadJSON,
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?, ?)`,
+		TaskFailed, taskID, planID, TaskDispatching, TaskDispatched, TaskRunning, TaskNeedsHuman)
+}
+
+// RecordAOUnreachable appends the informational ao_unreachable event (no
+// cache/state change): the scheduler writes it ONCE per outage while it
+// backs off; the plan must NOT fail because the AO daemon is down.
+func (s *Store) RecordAOUnreachable(planID, runID, payloadJSON string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		return appendEvent(tx, planID, "", runID, EventAOUnreachable, payloadJSON)
+	})
+}
+
+// ListEvents returns all events of a plan in append order (for `om events`).
+func (s *Store) ListEvents(planID string) ([]Event, error) {
+	rows, err := s.db.Query(
+		`SELECT id, plan_id, task_id, run_id, type, payload_json, created_at
+		 FROM brain_events WHERE plan_id = ? ORDER BY id`, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var taskID, created sql.NullString
+		if err := rows.Scan(&e.ID, &e.PlanID, &taskID, &e.RunID, &e.Type, &e.PayloadJSON, &created); err != nil {
+			return nil, err
+		}
+		e.TaskID = nullStr(taskID)
+		if e.CreatedAt, err = parseTime(created.String); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
