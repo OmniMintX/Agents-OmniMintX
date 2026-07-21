@@ -125,3 +125,61 @@ for r in anthropic-experimental/sandbox-runtime qodo-ai/pr-agent humanlayer/huma
 # Đợt 2 (khi vào Phase 3)
 for r in rust-lang/bors SWE-bench/SWE-bench dbos-inc/dbos-transact-golang sentient-agi/ROMA riverqueue/river jj-vcs/jj maximhq/bifrost microsandbox/microsandbox ServiceNow/TapeAgents; do git clone --depth 1 "https://github.com/$r.git"; done
 ```
+
+
+## Checklist dựng lại môi trường trên máy mới (2026-07-21)
+
+### 1. Clone repo
+`git clone https://github.com/OmniMintX/Agents-OmniMintX.git`
+Có sẵn: brain/ (code), SPEC.md, docs/OVERMIND.md, brain/docs/e2e.md, brain/config.example.yaml.
+
+### 2. Toolchain
+- Go >= 1.25 (go.mod). Xác nhận môi trường: `cd brain && go test ./... -race -count=1` (mốc: 149 pass / 7 packages tại e3a0395).
+- git, tmux (worker session chạy trong tmux).
+
+### 3. AO (agent-orchestrator) — bắt buộc cho runtime/E2E
+- Cài app AO (bản đang dùng 0.10.3), daemon nghe port 3001.
+- ~/.ao/data/ cũ KHÔNG cần mang theo (state toàn plan test /tmp).
+- Harness: Claude Code CLI + đăng nhập.
+
+### 4. Config Overmind
+- ~/.overmind/ tự tạo khi chạy; máy cũ không có config.yaml (chạy default + env OVERMIND_*) — không có gì phải chép.
+- ~/.overmind/overmind.db cũ không cần mang.
+- LLM remote: set env API key theo api_key_env (vd ANTHROPIC_API_KEY).
+
+### 5. docs/repo/ — repo tham khảo (gitignore, không theo repo)
+14 repo bổ sung ưu tiên: xem mục "Repo tham khảo cần bổ sung" phía trên. 26 repo hiện có trên máy cũ:
+
+```bash
+cd docs/repo
+git clone https://github.com/saltbo/agent-kanban.git
+git clone https://github.com/AgentWrapper/agent-orchestrator.git
+git clone https://github.com/aannoo/awesome-agent-orchestrators.git
+git clone https://github.com/steveyegge/beads
+git clone https://github.com/ruvnet/claude-flow
+git clone https://github.com/smtg-ai/claude-squad.git
+git clone https://github.com/dagger/container-use
+git clone https://github.com/stravu/crystal.git
+git clone https://github.com/standardagents/dmux.git
+git clone https://github.com/automagik-dev/forge.git
+git clone https://github.com/knowsuchagency/fulcrum.git
+git clone https://github.com/steveyegge/gastown
+git clone https://github.com/langchain-ai/langgraph
+git clone https://github.com/letta-ai/letta
+git clone https://github.com/mem0ai/mem0
+git clone https://github.com/alvinunreal/oh-my-opencode-slim
+git clone https://github.com/open-multi-agent/open-multi-agent
+git clone https://github.com/sst/opencode
+git clone https://github.com/OpenHands/OpenHands
+git clone https://github.com/nikitavivat/Overseer
+git clone https://github.com/vidhatanand/overstory.git
+git clone https://github.com/johannesjo/parallel-code.git
+git clone https://github.com/CChuYong/rookery.git
+git clone https://github.com/delivstat/swarmkit
+git clone https://github.com/SWE-agent/SWE-agent
+git clone https://github.com/BloopAI/vibe-kanban.git
+```
+
+### 6. Workspace Intent
+- Spec + task notes Phase 2 nằm trong workspace agent-orchestrator — mở lại là có.
+- Việc dở dang duy nhất: OM-10 (verifier LLM + retry budget) — chưa có code, bắt đầu sạch từ HEAD.
