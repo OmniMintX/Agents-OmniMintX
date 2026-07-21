@@ -9,7 +9,12 @@ type DerivedState struct {
 	PlanStatus   string
 	TaskStatus   map[string]string // task id -> derived status
 	VerifyRounds map[string]int    // task id -> task_retry count (retry budget source of truth)
-	LastRunID    string            // run_id of the most recent run_started
+	// Approved marks tasks with a task_approved event. Approval is
+	// PERMANENT for the task: OM-10 retry rounds never re-gate an
+	// approved requires_approval task (the scheduler consults this,
+	// not TaskStatus, which a task_retry resets to pending).
+	Approved  map[string]bool
+	LastRunID string // run_id of the most recent run_started
 }
 
 // PlanState replays the append-only event log and returns the derived
@@ -19,6 +24,7 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 		PlanStatus:   PlanDraft,
 		TaskStatus:   make(map[string]string, len(taskIDs)),
 		VerifyRounds: make(map[string]int, len(taskIDs)),
+		Approved:     make(map[string]bool, len(taskIDs)),
 	}
 	for _, id := range taskIDs {
 		st.TaskStatus[id] = TaskPending
@@ -73,6 +79,7 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 			case EventTaskApproved:
 				// Back to pending: dispatch follows the usual readiness rules.
 				st.TaskStatus[*e.TaskID] = TaskPending
+				st.Approved[*e.TaskID] = true
 			}
 		default:
 			return nil, fmt.Errorf("event %d: unknown type %q", e.ID, e.Type)

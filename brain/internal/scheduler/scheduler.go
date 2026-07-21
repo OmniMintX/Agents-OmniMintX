@@ -100,6 +100,18 @@ type Config struct {
 	// rounds are derived from task_retry events (DerivedState.VerifyRounds),
 	// never from in-memory state.
 	MaxVerifyRounds int
+	// Notifier delivers best-effort user notifications for events that
+	// need a human: task awaiting approval, task needs_human, plan
+	// done/failed. nil is silent. Implementations must never fail the
+	// run: Notify returns nothing and handles/logs its own errors.
+	Notifier Notifier
+}
+
+// Notifier is the user-notification hook (implemented in cmd/om with
+// osascript/terminal bell). Notify must be best-effort: no error return,
+// failures are the implementation's problem (log a warning, never panic).
+type Notifier interface {
+	Notify(title, body string)
 }
 
 func (c Config) withDefaults() Config {
@@ -181,6 +193,13 @@ type runner struct {
 func (s *Scheduler) logf(format string, args ...any) {
 	if s.Log != nil {
 		fmt.Fprintf(s.Log, format+"\n", args...)
+	}
+}
+
+// notify sends a best-effort user notification; a nil Notifier is silent.
+func (s *Scheduler) notify(title, body string) {
+	if s.Cfg.Notifier != nil {
+		s.Cfg.Notifier.Notify(title, body)
 	}
 }
 

@@ -319,3 +319,50 @@ func TestAutonomyAllowBypassFromFile(t *testing.T) {
 		t.Errorf("cfg = autonomy %q allowBypass %v", cfg.Autonomy, cfg.AutonomyAllowBypass)
 	}
 }
+
+func TestNotifyValidValues(t *testing.T) {
+	for _, v := range []string{NotifyAuto, NotifyBell, NotifyOff} {
+		cfg, err := Load(writeConfig(t, "notify: "+v+"\n"))
+		if err != nil {
+			t.Fatalf("Load(notify=%s): %v", v, err)
+		}
+		if cfg.Notify != v {
+			t.Errorf("Notify = %q, want %q", cfg.Notify, v)
+		}
+	}
+}
+
+func TestNotifyEmptyDefaultsToAuto(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notify != NotifyAuto {
+		t.Errorf("default Notify = %q, want %q", cfg.Notify, NotifyAuto)
+	}
+	cfg, err = Load(writeConfig(t, "notify: \"\"\n"))
+	if err != nil {
+		t.Fatalf("Load(notify empty): %v", err)
+	}
+	if cfg.Notify != NotifyAuto {
+		t.Errorf("empty Notify = %q, want %q", cfg.Notify, NotifyAuto)
+	}
+}
+
+func TestNotifyUnknownRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, "notify: loud\n"))
+	if err == nil || !strings.Contains(err.Error(), "notify") {
+		t.Fatalf("Load(notify=loud) err = %v, want unknown-notify error", err)
+	}
+}
+
+func TestNotifyEnvOverride(t *testing.T) {
+	t.Setenv("OVERMIND_NOTIFY", "off")
+	cfg, err := Load(writeConfig(t, "notify: bell\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notify != NotifyOff {
+		t.Errorf("Notify = %q, want off (env wins over file)", cfg.Notify)
+	}
+}

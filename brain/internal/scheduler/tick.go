@@ -82,9 +82,18 @@ func (r *runner) reconcileDispatching(ctx context.Context, t store.Task, round i
 // branch is in the default branch first (parents are merged locally when
 // they finish; this ancestry re-check covers crashes between merge and
 // finish, and DBs written by older binaries).
+// Approval gate (OM-12): a requires_approval task that was never approved
+// is parked in awaiting_approval INSTEAD of dispatching — it burns no
+// MaxParallel slot and has no timeout clock (clocks only exist for
+// dispatched sessions). The scheduler is the ONLY gatekeeper: the store's
+// RequestTaskApproval does not check the flag. Approval is permanent
+// (st.Approved), so OM-10 retry rounds are never re-gated.
 func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 	st, err := r.St.PlanState(r.plan.ID)
 	if err != nil {
+		return err
+	}
+	if err := r.failBlockedDependents(tasks, st); err != nil {
 		return err
 	}
 	active := 0
@@ -103,8 +112,19 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 		byID[t.ID] = t
 	}
 	for _, t := range ready {
+		if t.RequiresApproval && !st.Approved[t.ID] {
+			if err := r.St.RequestTaskApproval(r.plan.ID, t.ID, r.runID); err != nil {
+				return err
+			}
+			r.notify("Overmind: approval needed",
+				fmt.Sprintf("task %s (%s) awaits approval — om approve-task %s %s", t.ID, t.Title, r.plan.ID, t.ID))
+			r.logf("task %s: AWAITING APPROVAL — om approve-task %s %s", t.ID, r.plan.ID, t.ID)
+			continue
+		}
 		if active >= r.Cfg.MaxParallel {
-			return nil
+			// No free slot: keep scanning so gated tasks later in the
+			// ready list still get their approval request this tick.
+			continue
 		}
 		failReason, err := r.ensureParentsMerged(ctx, t, byID)
 		if errors.Is(err, errSkipDispatch) {
@@ -127,6 +147,46 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 			return err
 		}
 		active++
+	}
+	return nil
+}
+
+// failBlockedDependents fails every pending task that (transitively)
+// depends on a failed task with kind=dependency_failed: such a task can
+// never become ready, and failing it per-task (instead of leaving it
+// pending until the plan-level failure) surfaces WHY it will never run —
+// e.g. dependents of a rejected requires_approval task. It reuses the
+// merge-conflict mechanism: pending -> dispatching -> failed (FailTask has
+// no pending -> failed transition by design). Independent branches are
+// untouched. st.TaskStatus is updated in place so the caller sees the
+// cascade within the same tick.
+func (r *runner) failBlockedDependents(tasks []store.Task, st *store.DerivedState) error {
+	for changed := true; changed; {
+		changed = false
+		for _, t := range tasks {
+			if st.TaskStatus[t.ID] != store.TaskPending {
+				continue
+			}
+			failedDep := ""
+			for _, dep := range t.DependsOn {
+				if st.TaskStatus[dep] == store.TaskFailed {
+					failedDep = dep
+					break
+				}
+			}
+			if failedDep == "" {
+				continue
+			}
+			if err := r.St.MarkTaskDispatching(r.plan.ID, t.ID, r.runID); err != nil {
+				return err
+			}
+			if err := r.failTaskKind(t, "dependency_failed",
+				fmt.Sprintf("dependency %s failed", failedDep), "", nil); err != nil {
+				return err
+			}
+			st.TaskStatus[t.ID] = store.TaskFailed
+			changed = true
+		}
 	}
 	return nil
 }

@@ -33,8 +33,12 @@ func openStore(cfg config.Config) (*store.Store, error) {
 // runRun is `om run <plan-id>`: execute an approved plan against the AO
 // daemon until it is done or failed. Ctrl-C stops cleanly; re-running
 // resumes from the event log (dispatch is idempotent).
-func runRun(cfg config.Config, planID, autonomyFlag string) error {
+func runRun(cfg config.Config, planID, autonomyFlag, notifyFlag string) error {
 	autonomy, err := resolveAutonomy(cfg, autonomyFlag)
+	if err != nil {
+		return err
+	}
+	notify, err := resolveNotify(cfg, notifyFlag)
 	if err != nil {
 		return err
 	}
@@ -70,6 +74,7 @@ func runRun(cfg config.Config, planID, autonomyFlag string) error {
 			NoSignalTimeout:     time.Duration(cfg.NoSignalTimeoutMin) * time.Minute,
 			IdleNoMarkerTimeout: time.Duration(cfg.IdleNoMarkerTimeoutMin) * time.Minute,
 			MaxVerifyRounds:     cfg.MaxVerifyRounds,
+			Notifier:            notifierFor(notify, os.Stderr),
 		},
 		PID:    int64(os.Getpid()),
 		Log:    os.Stdout,
@@ -222,6 +227,7 @@ func runStatus(cfg config.Config, planID string) error {
 	fmt.Printf("Plan %s [%s] — %s\n\n", plan.ID, ds.PlanStatus, plan.Goal)
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "TASK\tSTATUS\tHARNESS\tDEPENDS ON\tSESSION\tPR")
+	var awaiting []string
 	for _, t := range tasks {
 		deps, sess, pr := "-", "-", "-"
 		if len(t.DependsOn) > 0 {
@@ -233,9 +239,19 @@ func runStatus(cfg config.Config, planID string) error {
 		if t.PRURL != nil {
 			pr = *t.PRURL
 		}
+		if ds.TaskStatus[t.ID] == store.TaskAwaitingApproval {
+			awaiting = append(awaiting, t.ID)
+		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", t.ID, ds.TaskStatus[t.ID], t.Harness, deps, sess, pr)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	for _, id := range awaiting {
+		fmt.Printf("\nTask %s awaits approval: om approve-task %s %s  (or reject: om reject-task %s %s --reason \"...\")\n",
+			id, planID, id, planID, id)
+	}
+	return nil
 }
 
 // runEvents is `om events <plan-id>`: dump the append-only brain event log.

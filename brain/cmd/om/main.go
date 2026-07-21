@@ -32,6 +32,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newPlanCmd(&cfgPath),
 		newApproveCmd(&cfgPath),
+		newApproveTaskCmd(&cfgPath),
+		newRejectTaskCmd(&cfgPath),
 		newRunCmd(&cfgPath),
 		newStatusCmd(&cfgPath),
 		newEventsCmd(&cfgPath),
@@ -83,8 +85,48 @@ func newApproveCmd(cfgPath *string) *cobra.Command {
 	}
 }
 
+func newApproveTaskCmd(cfgPath *string) *cobra.Command {
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "approve-task <plan-id> [task-id]",
+		Short: "Approve a task awaiting approval so the scheduler can dispatch it",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cfgPath)
+			if err != nil {
+				return err
+			}
+			taskID := ""
+			if len(args) == 2 {
+				taskID = args[1]
+			}
+			return runApproveTask(cfg, args[0], taskID, all)
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "approve every task currently awaiting approval in the plan")
+	return cmd
+}
+
+func newRejectTaskCmd(cfgPath *string) *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "reject-task <plan-id> <task-id>",
+		Short: "Reject a task awaiting approval (terminal; dependents fail too)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cfgPath)
+			if err != nil {
+				return err
+			}
+			return runRejectTask(cfg, args[0], args[1], reason)
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "why the task is rejected (recorded in the task_failed event)")
+	return cmd
+}
+
 func newRunCmd(cfgPath *string) *cobra.Command {
-	var autonomy string
+	var autonomy, notify string
 	cmd := &cobra.Command{
 		Use:   "run <plan-id>",
 		Short: "Run an approved plan: dispatch sessions to the AO daemon until done/failed",
@@ -94,11 +136,13 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runRun(cfg, args[0], autonomy)
+			return runRun(cfg, args[0], autonomy, notify)
 		},
 	}
 	cmd.Flags().StringVar(&autonomy, "autonomy", "",
 		"override config autonomy: auto | accept-edits | bypass-permissions | off")
+	cmd.Flags().StringVar(&notify, "notify", "",
+		"override config notify: auto | bell | off")
 	return cmd
 }
 

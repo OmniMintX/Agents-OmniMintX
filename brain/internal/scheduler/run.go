@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/OmniMintX/overmind/internal/store"
@@ -186,13 +187,15 @@ func (r *runner) sleepHeartbeat(ctx context.Context, d time.Duration) error {
 
 // checkCompletion derives the plan outcome: all tasks done -> plan_done;
 // nothing active AND nothing dispatchable -> plan_failed (failed tasks, or
-// pending tasks forever blocked by a failed dependency).
+// pending tasks forever blocked by a failed dependency). A task in
+// awaiting_approval keeps the plan alive indefinitely: it is neither
+// active nor dispatchable, but `om approve-task` can unblock it any time.
 func (r *runner) checkCompletion() (bool, error) {
 	st, err := r.St.PlanState(r.plan.ID)
 	if err != nil {
 		return false, err
 	}
-	allDone, anyActive := true, false
+	allDone, anyActive, anyAwaiting := true, false, false
 	var failed []string
 	for id, status := range st.TaskStatus {
 		switch status {
@@ -202,6 +205,8 @@ func (r *runner) checkCompletion() (bool, error) {
 			failed = append(failed, id)
 		case store.TaskDispatching, store.TaskDispatched, store.TaskRunning, store.TaskNeedsHuman:
 			allDone, anyActive = false, true
+		case store.TaskAwaitingApproval:
+			allDone, anyAwaiting = false, true
 		default: // pending
 			allDone = false
 		}
@@ -210,10 +215,11 @@ func (r *runner) checkCompletion() (bool, error) {
 		if err := r.St.FinishPlan(r.plan.ID, r.runID); err != nil {
 			return false, err
 		}
+		r.notify("Overmind: plan done", fmt.Sprintf("plan %s finished — all tasks done", r.plan.ID))
 		r.logf("plan %s: done", r.plan.ID)
 		return true, nil
 	}
-	if anyActive {
+	if anyActive || anyAwaiting {
 		return false, nil
 	}
 	ready, err := r.St.GetReadyTasks(r.plan.ID)
@@ -225,6 +231,8 @@ func (r *runner) checkCompletion() (bool, error) {
 	if err := r.St.FailPlan(r.plan.ID, r.runID, payload); err != nil {
 		return false, err
 	}
+	r.notify("Overmind: plan failed",
+		fmt.Sprintf("plan %s failed — failed tasks: %s", r.plan.ID, strings.Join(failed, ", ")))
 	r.logf("plan %s: failed (%s)", r.plan.ID, payload)
 	return true, nil
 }

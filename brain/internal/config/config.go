@@ -59,6 +59,7 @@ type Config struct {
 	MaxVerifyRounds        int                 `yaml:"max_verify_rounds"`     // retry budget per task on verify fail (0 = no retries)
 	Autonomy               string              `yaml:"autonomy"`              // permission mode om run sets on the AO project before dispatch (see NormalizeAutonomy)
 	AutonomyAllowBypass    bool                `yaml:"autonomy_allow_bypass"` // explicit opt-in required for autonomy=bypass-permissions (workers run unsandboxed)
+	Notify                 string              `yaml:"notify"`                // user notifications from om run: auto | bell | off (see NormalizeNotify)
 
 	// Warnings collected while loading (e.g. legacy-config migration notice).
 	// Not part of the YAML schema; callers should surface them to the user.
@@ -107,7 +108,32 @@ func Default() (Config, error) {
 		IdleNoMarkerTimeoutMin: 10,
 		MaxVerifyRounds:        2,
 		Autonomy:               AutonomyAuto,
+		Notify:                 NotifyAuto,
 	}, nil
+}
+
+// Notify modes: how om run notifies the user on approval-needed /
+// needs-human / plan-finished events. NotifyAuto tries a desktop
+// notification (macOS osascript) and falls back to the terminal bell;
+// NotifyBell always uses the bell; NotifyOff is silent.
+const (
+	NotifyAuto = "auto"
+	NotifyBell = "bell"
+	NotifyOff  = "off"
+)
+
+// NormalizeNotify validates a notify value and returns its canonical form.
+// Empty means NotifyAuto (the default); anything outside the three known
+// modes is an error.
+func NormalizeNotify(v string) (string, error) {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "":
+		return NotifyAuto, nil
+	case NotifyAuto, NotifyBell, NotifyOff:
+		return s, nil
+	default:
+		return "", fmt.Errorf("unknown notify %q (expected auto, bell or off)", v)
+	}
 }
 
 // Autonomy modes: the permission mode `om run` sets on the AO project config
@@ -234,6 +260,11 @@ func validate(cfg *Config) error {
 		return err
 	}
 	cfg.Autonomy = autonomy
+	notify, err := NormalizeNotify(cfg.Notify)
+	if err != nil {
+		return err
+	}
+	cfg.Notify = notify
 	for name, p := range cfg.Providers {
 		switch strings.ToLower(strings.TrimSpace(p.Type)) {
 		case "", "auto", "anthropic", "cli", "openai", "openai-compatible":
@@ -304,6 +335,7 @@ func applyEnv(cfg *Config) {
 	envInt("OVERMIND_MAX_VERIFY_ROUNDS", &cfg.MaxVerifyRounds)
 	envStr("OVERMIND_AUTONOMY", &cfg.Autonomy)
 	envBool("OVERMIND_AUTONOMY_ALLOW_BYPASS", &cfg.AutonomyAllowBypass)
+	envStr("OVERMIND_NOTIFY", &cfg.Notify)
 }
 
 func envStr(key string, dst *string) {

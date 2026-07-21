@@ -78,3 +78,13 @@ autonomy: auto
 # `om run --autonomy=bypass-permissions` is refused while this is false.
 # env: OVERMIND_AUTONOMY_ALLOW_BYPASS
 autonomy_allow_bypass: false
+
+# Notifications: how `om run` alerts you when a task awaits approval, a task
+# needs human input, or the plan finishes (override per run: om run --notify=...).
+#   auto - (default) macOS desktop notification via osascript, falling back
+#          to the terminal bell if osascript is unavailable or fails
+#   bell - terminal bell (BEL to stderr) only
+#   off  - silent
+# Notifications are best-effort: a failed notification never fails the run.
+# env: OVERMIND_NOTIFY
+notify: auto

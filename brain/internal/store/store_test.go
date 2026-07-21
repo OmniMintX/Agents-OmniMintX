@@ -360,6 +360,26 @@ func TestApprovalGate(t *testing.T) {
 		t.Fatalf("approved task must be ready again, got %v", taskIDs(ready))
 	}
 
+	// Approval is PERMANENT: a verify-fail retry (task_retry) resets the
+	// status to pending but Approved must survive, so the scheduler never
+	// re-gates a retry round.
+	must(s.MarkTaskDispatching("p1", "a", "run-1"))
+	must(s.DispatchTask("p1", "a", "run-1", "sess-1", "ao/sess-1"))
+	must(s.RetryTask("p1", "a", "run-1", `{"tier":1}`))
+	st1, err := s.PlanState("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st1.TaskStatus["a"] != TaskPending {
+		t.Fatalf("retried task status = %q, want pending", st1.TaskStatus["a"])
+	}
+	if !st1.Approved["a"] {
+		t.Fatal("Approved[a] must survive a task_retry (approve once is enough)")
+	}
+	if st1.Approved["b"] {
+		t.Fatal("Approved[b] must be false (never approved)")
+	}
+
 	// Reject path: awaiting_approval -> failed (kind=rejected), terminal.
 	gated2 := nt("a")
 	gated2.RequiresApproval = true

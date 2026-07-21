@@ -48,6 +48,8 @@ func (r *runner) pollTask(ctx context.Context, t store.Task, derived string) err
 			if err := r.St.MarkTaskNeedsHuman(r.plan.ID, t.ID, r.runID, payload); err != nil {
 				return err
 			}
+			r.notify("Overmind: task needs human",
+				fmt.Sprintf("task %s (%s) needs human (%s) — answer in AO session %s", t.ID, t.Title, sess.Status, sess.ID))
 			r.logf("task %s: NEEDS HUMAN (%s) — waiting, timeout clock stopped", t.ID, sess.Status)
 		}
 		return nil

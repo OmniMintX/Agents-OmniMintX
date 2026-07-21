@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,7 +120,18 @@ func TestRunFailedDependencyBlocksChild(t *testing.T) {
 	if sts["a1234567"] != store.TaskFailed {
 		t.Fatalf("parent = %s, want failed", sts["a1234567"])
 	}
-	if sts["b1234567"] != store.TaskPending {
-		t.Fatalf("blocked child = %s, want pending (never dispatched)", sts["b1234567"])
+	// OM-12: the cascade fails the blocked child explicitly (kind=
+	// dependency_failed) instead of leaving it pending forever.
+	if sts["b1234567"] != store.TaskFailed {
+		t.Fatalf("blocked child = %s, want failed (dependency_failed cascade)", sts["b1234567"])
+	}
+	var cascaded bool
+	for _, p := range eventPayloads(t, st, store.EventTaskFailed) {
+		if strings.Contains(p, `"kind":"dependency_failed"`) && strings.Contains(p, "dependency a1234567 failed") {
+			cascaded = true
+		}
+	}
+	if !cascaded {
+		t.Fatal("child task_failed must have kind=dependency_failed naming the failed dep")
 	}
 }
