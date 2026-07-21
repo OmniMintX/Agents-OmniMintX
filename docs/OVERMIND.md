@@ -73,3 +73,13 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 ### Trạng thái hiện tại (2026-07-21)
 - **Wave 1**: OM-13 **xong** (commit 8cfddb1), OM-8 **đang chạy**.
 - Các wave sau chưa bắt đầu.
+
+## Nghiên cứu bên ngoài — herdr (đánh giá 2026-07-21)
+
+[herdr](https://github.com/ogulcancelik/herdr) (~18.9k sao, v0.7.4 07/2026, Rust 1 binary, AGPL-3.0 + dual-license thương mại) — **agent multiplexer trong terminal**, kiểu tmux chuyên cho AI coding agent: bảng trạng thái blocked/working/done trên terminal view thật, detach/reattach qua SSH, session sống sót restart, socket API cho agent tự spawn pane/đọc output/chờ nhau, plugin marketplace.
+
+**Kết luận: KHÔNG đưa vào core.** herdr không cạnh tranh với Overmind (không planner, không DAG, không merge, không verify) — nó cạnh tranh một phần với AO daemon, nhưng thiếu những thứ Overmind phụ thuộc: worktree + branch `ao/<session>/root` per-session, PreviewFile (dò marker), displayName (idempotency key), 13 derived status. Thay AO bằng herdr = tự xây lại toàn bộ phần đó. "Compose, không fork AO" vẫn đúng hướng.
+
+Hai chỗ dùng được:
+1. **Tầng quan sát/can thiệp `needs_human` (ngắn hạn)**: chạy worker session trong herdr thay tmux trần → thấy ngay agent nào blocked, attach từ xa để bấm trust-dialog/approval (pain point E2E lần 3). Dùng như tool ngoài → AGPL không ảnh hưởng. Caveat: cần kiểm chứng AO có cho cấu hình nơi chạy session; và OM-11 (PUT project config permissions) giải gốc rễ tốt hơn — herdr chỉ làm việc bấm tay dễ chịu hơn.
+2. **Ứng viên runtime thay AO (Phase 3+, dự phòng)**: socket API spawn/read/wait + session persistence là nền khả dĩ nếu muốn thoát AO 0.10.3 (MergePR stub, không API PR, thiếu route workspace/files). Chi phí: viết lại aoclient + tự quản worktree/branch — không đáng khi Phase 2 chưa xong.
