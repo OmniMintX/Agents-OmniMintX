@@ -56,6 +56,7 @@ type Config struct {
 	TaskTimeoutMin         int                 `yaml:"task_timeout_min"`
 	NoSignalTimeoutMin     int                 `yaml:"no_signal_timeout_min"`
 	IdleNoMarkerTimeoutMin int                 `yaml:"idle_no_marker_timeout_min"`
+	MaxVerifyRounds        int                 `yaml:"max_verify_rounds"` // retry budget per task on verify fail (0 = no retries)
 
 	// Warnings collected while loading (e.g. legacy-config migration notice).
 	// Not part of the YAML schema; callers should surface them to the user.
@@ -102,6 +103,7 @@ func Default() (Config, error) {
 		TaskTimeoutMin:         45,
 		NoSignalTimeoutMin:     10,
 		IdleNoMarkerTimeoutMin: 10,
+		MaxVerifyRounds:        2,
 	}, nil
 }
 
@@ -197,6 +199,9 @@ func legacyProviderType(p string) string {
 // validate checks the v2 provider/role schema (runs after migration, so a
 // legacy config is validated in its migrated form).
 func validate(cfg *Config) error {
+	if cfg.MaxVerifyRounds < 0 {
+		return fmt.Errorf("max_verify_rounds must be >= 0, got %d", cfg.MaxVerifyRounds)
+	}
 	for name, p := range cfg.Providers {
 		switch strings.ToLower(strings.TrimSpace(p.Type)) {
 		case "", "auto", "anthropic", "cli", "openai", "openai-compatible":
@@ -264,6 +269,7 @@ func applyEnv(cfg *Config) {
 	envInt("OVERMIND_TASK_TIMEOUT_MIN", &cfg.TaskTimeoutMin)
 	envInt("OVERMIND_NO_SIGNAL_TIMEOUT_MIN", &cfg.NoSignalTimeoutMin)
 	envInt("OVERMIND_IDLE_NO_MARKER_TIMEOUT_MIN", &cfg.IdleNoMarkerTimeoutMin)
+	envInt("OVERMIND_MAX_VERIFY_ROUNDS", &cfg.MaxVerifyRounds)
 }
 
 func envStr(key string, dst *string) {

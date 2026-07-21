@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MaxParallel != 3 || cfg.PollIntervalSec != 15 || cfg.TaskTimeoutMin != 45 || cfg.NoSignalTimeoutMin != 10 {
 		t.Errorf("numeric defaults = %+v", cfg)
 	}
+	if cfg.MaxVerifyRounds != 2 {
+		t.Errorf("MaxVerifyRounds default = %d, want 2", cfg.MaxVerifyRounds)
+	}
 	p, ok := cfg.Providers["default"]
 	if !ok {
 		t.Fatalf("defaults should migrate to providers.default, got %+v", cfg.Providers)
@@ -222,6 +225,30 @@ roles:
 				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestMaxVerifyRounds(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "max_verify_rounds: 0\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxVerifyRounds != 0 {
+		t.Errorf("file MaxVerifyRounds = %d, want 0", cfg.MaxVerifyRounds)
+	}
+
+	t.Setenv("OVERMIND_MAX_VERIFY_ROUNDS", "5")
+	cfg, err = Load(writeConfig(t, "max_verify_rounds: 1\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxVerifyRounds != 5 {
+		t.Errorf("env should beat file: MaxVerifyRounds = %d, want 5", cfg.MaxVerifyRounds)
+	}
+	t.Setenv("OVERMIND_MAX_VERIFY_ROUNDS", "")
+
+	if _, err := Load(writeConfig(t, "max_verify_rounds: -1\n")); err == nil || !strings.Contains(err.Error(), "max_verify_rounds") {
+		t.Fatalf("negative max_verify_rounds should be rejected, got %v", err)
 	}
 }
 

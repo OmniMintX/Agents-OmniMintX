@@ -5,21 +5,24 @@ import "fmt"
 // DerivedState is the plan/task state computed purely from brain_events.
 // This is the source of truth; status columns are display caches only.
 type DerivedState struct {
-	PlanID     string
-	PlanStatus string
-	TaskStatus map[string]string // task id -> derived status
-	LastRunID  string            // run_id of the most recent run_started
+	PlanID       string
+	PlanStatus   string
+	TaskStatus   map[string]string // task id -> derived status
+	VerifyRounds map[string]int    // task id -> task_retry count (retry budget source of truth)
+	LastRunID    string            // run_id of the most recent run_started
 }
 
 // PlanState replays the append-only event log and returns the derived
 // state. Resume/crash-recovery MUST use this, never the cache columns.
 func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 	st := &DerivedState{
-		PlanStatus: PlanDraft,
-		TaskStatus: make(map[string]string, len(taskIDs)),
+		PlanStatus:   PlanDraft,
+		TaskStatus:   make(map[string]string, len(taskIDs)),
+		VerifyRounds: make(map[string]int, len(taskIDs)),
 	}
 	for _, id := range taskIDs {
 		st.TaskStatus[id] = TaskPending
+		st.VerifyRounds[id] = 0
 	}
 	for _, e := range events {
 		st.PlanID = e.PlanID
@@ -42,7 +45,8 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 			// Informational only: no state change (merged-ness lives in git;
 			// a tier-0 fail is followed by its own task_failed event).
 		case EventTaskDispatching, EventTaskDispatched, EventTaskStarted,
-			EventTaskNeedsHuman, EventTaskResumed, EventTaskDone, EventTaskFailed:
+			EventTaskNeedsHuman, EventTaskResumed, EventTaskDone, EventTaskFailed,
+			EventTaskRetry:
 			if e.TaskID == nil {
 				return nil, fmt.Errorf("event %d (%s): missing task_id", e.ID, e.Type)
 			}
@@ -61,6 +65,9 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 				st.TaskStatus[*e.TaskID] = TaskDone
 			case EventTaskFailed:
 				st.TaskStatus[*e.TaskID] = TaskFailed
+			case EventTaskRetry:
+				st.TaskStatus[*e.TaskID] = TaskPending
+				st.VerifyRounds[*e.TaskID]++
 			}
 		default:
 			return nil, fmt.Errorf("event %d: unknown type %q", e.ID, e.Type)

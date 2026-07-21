@@ -44,6 +44,7 @@ const (
 	EventTaskResumed     = "task_resumed"     // human unblocked the session
 	EventTaskDone        = "task_done"
 	EventTaskFailed      = "task_failed"
+	EventTaskRetry       = "task_retry"     // {round, tier, reason, feedback}: verify fail -> back to pending for re-dispatch
 	EventAOUnreachable   = "ao_unreachable" // informational; no state change
 	// Local-merge audit events (informational; git ancestry is the source
 	// of truth for merged-ness, these only record what the scheduler did).
@@ -75,6 +76,7 @@ type Task struct {
 	Prompt      string
 	Harness     string
 	Check       string // tier-0 verify command from the planner (may be empty)
+	Verify      string // verify strategy from the planner, e.g. "llm" (may be empty)
 	Status      string
 	AOSessionID *string
 	Branch      *string // AO-assigned branch, e.g. ao/<sessionID>/root
@@ -90,6 +92,7 @@ type NewTask struct {
 	Prompt    string
 	Harness   string
 	Check     string // tier-0 verify command (may be empty)
+	Verify    string // verify strategy, e.g. "llm" (may be empty)
 	DependsOn []string
 }
 

@@ -55,6 +55,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateTasksVerify(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -75,6 +79,27 @@ func migrateTasksCheck(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN check_cmd TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("migrate tasks check_cmd: %w", err)
+	}
+	return nil
+}
+
+// migrateTasksVerify adds the verify column (per-task verify strategy,
+// OM-10) to tasks tables created before the column existed. Runs after
+// migrateTasksPK: the PK rebuild recreates tasks without verify.
+func migrateTasksVerify(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&ddl)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("migrate tasks verify: read tasks ddl: %w", err)
+	}
+	if strings.Contains(ddl, "verify") {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN verify TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate tasks verify: %w", err)
 	}
 	return nil
 }

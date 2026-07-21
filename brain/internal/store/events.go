@@ -134,6 +134,17 @@ func (s *Store) ResumeTask(planID, taskID, runID string) error {
 		TaskRunning, taskID, planID, TaskNeedsHuman)
 }
 
+// RetryTask: dispatched|running|needs_human -> pending (verify failed, the
+// task will be re-dispatched with feedback). Clears ao_session_id and branch:
+// the old session is terminated and a retry always gets a NEW session. The
+// retry budget is derived by counting task_retry events at replay
+// (DerivedState.VerifyRounds), never from in-memory state.
+func (s *Store) RetryTask(planID, taskID, runID, payloadJSON string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskRetry, payloadJSON,
+		`UPDATE tasks SET status = ?, ao_session_id = NULL, branch = NULL WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?)`,
+		TaskPending, taskID, planID, TaskDispatched, TaskRunning, TaskNeedsHuman)
+}
+
 // FinishTask: dispatched|running|needs_human -> done, with optional PR URL
 // and a structured task_done payload (marker summary etc.).
 func (s *Store) FinishTask(planID, taskID, runID, prURL, payloadJSON string) error {
