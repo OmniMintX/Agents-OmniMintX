@@ -22,6 +22,7 @@ no commentary, no extra fields:
       "harness": "one of the available harness IDs",
       "check": "one shell command verifying the task's definition of done",
       "verify": "none | deterministic | llm — how the finished task is verified",
+      "requires_approval": false,
       "depends_on": ["title of the prerequisite task, if any"]
     }
   ]
@@ -56,3 +57,8 @@ HARD RULES:
    (e.g. code quality, refactors, API design, prose); "none" only for
    trivial tasks where verification adds nothing. When unsure, use
    "deterministic".
+8. Set "requires_approval": true ONLY for destructive or irreversible
+   tasks (deleting files/data, schema migrations dropping data, touching
+   production systems, force-pushing). Such a task waits for explicit
+   human approval before an agent is started. Everything else: false
+   (or omit the field).

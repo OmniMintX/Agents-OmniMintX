@@ -28,13 +28,14 @@ type LLM interface {
 
 // Task is one validated plan task, ready for store.NewTask.
 type Task struct {
-	ID        string
-	Title     string
-	Prompt    string
-	Harness   string
-	Check     string   // tier-0 verify command run in the worktree (may be empty)
-	Verify    string   // verify strategy: none|deterministic|llm (empty input defaults to deterministic)
-	DependsOn []string // task IDs (at most one in phase 1)
+	ID               string
+	Title            string
+	Prompt           string
+	Harness          string
+	Check            string   // tier-0 verify command run in the worktree (may be empty)
+	Verify           string   // verify strategy: none|deterministic|llm (empty input defaults to deterministic)
+	RequiresApproval bool     // dispatch gated on human approval (OM-12); absent defaults to false
+	DependsOn        []string // task IDs (at most one in phase 1)
 }
 
 // Plan is the validated result of a Generate or Parse call.

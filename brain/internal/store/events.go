@@ -134,6 +134,46 @@ func (s *Store) ResumeTask(planID, taskID, runID string) error {
 		TaskRunning, taskID, planID, TaskNeedsHuman)
 }
 
+// RequestTaskApproval: pending -> awaiting_approval. The scheduler records
+// this ONCE when a requires_approval task comes up for dispatch; the task
+// then blocks BEFORE any AO session exists until ApproveTask (or a reject
+// via FailTask kind=rejected). Idempotence comes from the state guard: a
+// task already awaiting approval is no longer pending, so a second call
+// fails instead of double-appending the event.
+func (s *Store) RequestTaskApproval(planID, taskID, runID string) error {
+	return s.taskTransition(planID, taskID, runID, EventTaskApprovalRequested, "",
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status = ?`,
+		TaskAwaitingApproval, taskID, planID, TaskPending)
+}
+
+// ApproveTask: awaiting_approval -> pending (`om approve-task`). The task
+// becomes dispatchable again under the usual readiness rules. Approving a
+// task in any other status is an explicit error naming the actual status.
+func (s *Store) ApproveTask(planID, taskID, runID string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status = ?`,
+			TaskPending, taskID, planID, TaskAwaitingApproval)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			var cur string
+			if scanErr := tx.QueryRow(
+				`SELECT status FROM tasks WHERE id = ? AND plan_id = ?`, taskID, planID,
+			).Scan(&cur); scanErr != nil {
+				return fmt.Errorf("task %s: not found in plan %s", taskID, planID)
+			}
+			return fmt.Errorf("task %s: cannot approve from status %q (only awaiting_approval tasks can be approved)", taskID, cur)
+		}
+		return appendEvent(tx, planID, taskID, runID, EventTaskApproved, "")
+	})
+}
+
 // RetryTask: dispatched|running|needs_human -> pending (verify failed, the
 // task will be re-dispatched with feedback). Clears ao_session_id and branch:
 // the old session is terminated and a retry always gets a NEW session. The
@@ -157,11 +197,13 @@ func (s *Store) FinishTask(planID, taskID, runID, prURL, payloadJSON string) err
 		TaskDone, pr, taskID, planID, TaskDispatched, TaskRunning, TaskNeedsHuman)
 }
 
-// FailTask: dispatching|dispatched|running|needs_human -> failed.
+// FailTask: dispatching|dispatched|running|needs_human|awaiting_approval
+// -> failed. A reject (`om reject-task`) is a FailTask from
+// awaiting_approval with payload {kind: "rejected"}; failed is TERMINAL.
 func (s *Store) FailTask(planID, taskID, runID, payloadJSON string) error {
 	return s.taskTransition(planID, taskID, runID, EventTaskFailed, payloadJSON,
-		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?, ?)`,
-		TaskFailed, taskID, planID, TaskDispatching, TaskDispatched, TaskRunning, TaskNeedsHuman)
+		`UPDATE tasks SET status = ? WHERE id = ? AND plan_id = ? AND status IN (?, ?, ?, ?, ?)`,
+		TaskFailed, taskID, planID, TaskDispatching, TaskDispatched, TaskRunning, TaskNeedsHuman, TaskAwaitingApproval)
 }
 
 // RecordAOUnreachable appends the informational ao_unreachable event (no

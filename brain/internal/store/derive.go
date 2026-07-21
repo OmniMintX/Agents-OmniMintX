@@ -46,7 +46,7 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 			// a tier-0 fail is followed by its own task_failed event).
 		case EventTaskDispatching, EventTaskDispatched, EventTaskStarted,
 			EventTaskNeedsHuman, EventTaskResumed, EventTaskDone, EventTaskFailed,
-			EventTaskRetry:
+			EventTaskRetry, EventTaskApprovalRequested, EventTaskApproved:
 			if e.TaskID == nil {
 				return nil, fmt.Errorf("event %d (%s): missing task_id", e.ID, e.Type)
 			}
@@ -68,6 +68,11 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 			case EventTaskRetry:
 				st.TaskStatus[*e.TaskID] = TaskPending
 				st.VerifyRounds[*e.TaskID]++
+			case EventTaskApprovalRequested:
+				st.TaskStatus[*e.TaskID] = TaskAwaitingApproval
+			case EventTaskApproved:
+				// Back to pending: dispatch follows the usual readiness rules.
+				st.TaskStatus[*e.TaskID] = TaskPending
 			}
 		default:
 			return nil, fmt.Errorf("event %d: unknown type %q", e.ID, e.Type)

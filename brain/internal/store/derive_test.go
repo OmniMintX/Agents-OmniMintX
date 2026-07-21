@@ -89,6 +89,90 @@ func TestDeriveMatchesCacheAndSurvivesCacheWipe(t *testing.T) {
 	}
 }
 
+// TestDeriveApprovalChain: task_approval_requested → task_approved →
+// task_dispatching… derives the right status at every step, and the derived
+// state survives a cache wipe (crash replay from events alone).
+func TestDeriveApprovalChain(t *testing.T) {
+	s := openTestStore(t)
+	gated := nt("a")
+	gated.RequiresApproval = true
+	mustCreatePlan(t, s, "p1", gated)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.ApprovePlan("p1"))
+	must(s.StartRun("p1", "run-1"))
+
+	steps := []struct {
+		do   func() error
+		want string
+	}{
+		{func() error { return s.RequestTaskApproval("p1", "a", "run-1") }, TaskAwaitingApproval},
+		{func() error { return s.ApproveTask("p1", "a", "run-1") }, TaskPending},
+		{func() error { return s.MarkTaskDispatching("p1", "a", "run-1") }, TaskDispatching},
+		{func() error { return s.DispatchTask("p1", "a", "run-1", "sess-a", "ao/sess-a/root") }, TaskDispatched},
+		{func() error { return s.StartTask("p1", "a", "run-1") }, TaskRunning},
+		{func() error { return s.FinishTask("p1", "a", "run-1", "https://pr/1", "") }, TaskDone},
+	}
+	for i, step := range steps {
+		must(step.do())
+		st := assertDeriveMatchesCache(t, s, "p1")
+		if st.TaskStatus["a"] != step.want {
+			t.Fatalf("step %d: status %q, want %q", i, st.TaskStatus["a"], step.want)
+		}
+	}
+
+	// Crash replay: wipe the cache; re-derive from events must match.
+	if _, err := s.db.Exec(`UPDATE tasks SET status='pending' WHERE plan_id='p1'`); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.PlanState("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TaskStatus["a"] != TaskDone {
+		t.Fatalf("after cache wipe: %q, want done", st.TaskStatus["a"])
+	}
+}
+
+// TestDeriveRejectedTerminal: task_failed with kind=rejected derives to
+// failed and stays failed on replay — no event can resurrect it.
+func TestDeriveRejectedTerminal(t *testing.T) {
+	s := openTestStore(t)
+	gated := nt("a")
+	gated.RequiresApproval = true
+	mustCreatePlan(t, s, "p1", gated)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.ApprovePlan("p1"))
+	must(s.StartRun("p1", "run-1"))
+	must(s.RequestTaskApproval("p1", "a", "run-1"))
+	must(s.FailTask("p1", "a", "run-1", `{"kind":"rejected"}`))
+
+	st := assertDeriveMatchesCache(t, s, "p1")
+	if st.TaskStatus["a"] != TaskFailed {
+		t.Fatalf("rejected: derived %q, want failed", st.TaskStatus["a"])
+	}
+	// Replay after cache wipe keeps it failed.
+	if _, err := s.db.Exec(`UPDATE tasks SET status='pending' WHERE plan_id='p1'`); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := s.PlanState("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.TaskStatus["a"] != TaskFailed {
+		t.Fatalf("rejected after wipe: %q, want failed", st2.TaskStatus["a"])
+	}
+}
+
 func TestResumeAfterReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "resume.db")
 	s, err := Open(path)

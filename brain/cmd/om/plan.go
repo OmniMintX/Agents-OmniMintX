@@ -78,7 +78,7 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 func storeTasks(tasks []planner.Task) []store.NewTask {
 	out := make([]store.NewTask, len(tasks))
 	for i, t := range tasks {
-		out[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, Check: t.Check, Verify: t.Verify, DependsOn: t.DependsOn}
+		out[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, Check: t.Check, Verify: t.Verify, RequiresApproval: t.RequiresApproval, DependsOn: t.DependsOn}
 	}
 	return out
 }

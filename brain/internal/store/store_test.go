@@ -234,6 +234,152 @@ func TestMigrateTasksVerify(t *testing.T) {
 	}
 }
 
+// TestMigrateTasksApproval: a database created before OM-12 (no
+// requires_approval column, status CHECK without 'awaiting_approval') must
+// be rebuilt on Open keeping existing rows, the migration must be
+// idempotent across reopens, and new plans must round-trip RequiresApproval.
+func TestMigrateTasksApproval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// Recreate the pre-OM-12 layout: check_cmd + verify present, no
+	// requires_approval, CHECK without 'awaiting_approval'.
+	stmts := []string{
+		`DROP TABLE task_dependencies`,
+		`DROP TABLE tasks`,
+		`CREATE TABLE tasks (
+		    id            TEXT NOT NULL,
+		    plan_id       TEXT NOT NULL REFERENCES plans(id),
+		    title         TEXT NOT NULL,
+		    prompt        TEXT NOT NULL,
+		    harness       TEXT NOT NULL,
+		    check_cmd     TEXT NOT NULL DEFAULT '',
+		    verify        TEXT NOT NULL DEFAULT '',
+		    status        TEXT NOT NULL DEFAULT 'pending'
+		        CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','done','failed')),
+		    ao_session_id TEXT,
+		    branch        TEXT,
+		    pr_url        TEXT,
+		    created_at    TEXT NOT NULL,
+		    PRIMARY KEY (id, plan_id)
+		)`,
+		`CREATE TABLE task_dependencies (
+		    plan_id            TEXT NOT NULL,
+		    task_id            TEXT NOT NULL,
+		    depends_on_task_id TEXT NOT NULL,
+		    PRIMARY KEY (plan_id, task_id, depends_on_task_id),
+		    CHECK (task_id <> depends_on_task_id),
+		    FOREIGN KEY (task_id, plan_id) REFERENCES tasks(id, plan_id),
+		    FOREIGN KEY (depends_on_task_id, plan_id) REFERENCES tasks(id, plan_id)
+		)`,
+		`INSERT INTO plans (id, goal, project_id, status, created_at) VALUES ('p1', 'goal of p1', 'proj-1', 'draft', '` + now() + `')`,
+		`INSERT INTO tasks (id, plan_id, title, prompt, harness, verify, status, created_at) VALUES ('t1', 'p1', 't1', 'p', 'claude-code', 'llm', 'done', '` + now() + `')`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("prepare old schema: %v", err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen twice: the migration must be idempotent.
+	for i := 0; i < 2; i++ {
+		s2, err := Open(path)
+		if err != nil {
+			t.Fatalf("reopen %d (migration): %v", i, err)
+		}
+		tasks, err := s2.GetTasks("p1")
+		if err != nil || len(tasks) != 1 {
+			t.Fatalf("reopen %d: want 1 task, got %d (err %v)", i, len(tasks), err)
+		}
+		if tasks[0].RequiresApproval || tasks[0].Verify != "llm" || tasks[0].Status != TaskDone {
+			t.Fatalf("reopen %d: pre-migration row mangled: %+v", i, tasks[0])
+		}
+		if err := s2.Close(); err != nil {
+			t.Fatalf("reopen %d close: %v", i, err)
+		}
+	}
+
+	s3, err := Open(path)
+	if err != nil {
+		t.Fatalf("final reopen: %v", err)
+	}
+	t.Cleanup(func() { s3.Close() })
+	// RequiresApproval round-trips and the rebuilt CHECK accepts the new
+	// awaiting_approval status.
+	gated := nt("t1")
+	gated.RequiresApproval = true
+	mustCreatePlan(t, s3, "p2", gated)
+	tasks, err := s3.GetTasks("p2")
+	if err != nil || len(tasks) != 1 || !tasks[0].RequiresApproval {
+		t.Fatalf("requires_approval round-trip: %+v (err %v)", tasks, err)
+	}
+	if _, err := s3.db.Exec(`UPDATE tasks SET status='awaiting_approval' WHERE plan_id='p2'`); err != nil {
+		t.Fatalf("rebuilt CHECK must allow awaiting_approval: %v", err)
+	}
+}
+
+// TestApprovalGate: RequestTaskApproval blocks dispatch (GetReadyTasks must
+// not return an awaiting_approval task), ApproveTask unblocks it, approving
+// from any other status is a clear error, and a reject (task_failed with
+// kind=rejected) is terminal.
+func TestApprovalGate(t *testing.T) {
+	s := openTestStore(t)
+	gated := nt("a")
+	gated.RequiresApproval = true
+	mustCreatePlan(t, s, "p1", gated, nt("b", "a"))
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.ApprovePlan("p1"))
+	must(s.StartRun("p1", "run-1"))
+
+	// Approving a task that is not awaiting approval is a clear error.
+	if err := s.ApproveTask("p1", "a", "run-1"); err == nil || !strings.Contains(err.Error(), `cannot approve from status "pending"`) {
+		t.Fatalf("approve of pending task: want status error, got %v", err)
+	}
+
+	must(s.RequestTaskApproval("p1", "a", "run-1"))
+	// Double-request must fail (no longer pending).
+	if err := s.RequestTaskApproval("p1", "a", "run-1"); err == nil {
+		t.Fatal("second approval request should fail")
+	}
+	if ready, _ := s.GetReadyTasks("p1"); len(ready) != 0 {
+		t.Fatalf("awaiting_approval task must not be ready, got %v", taskIDs(ready))
+	}
+
+	must(s.ApproveTask("p1", "a", "run-1"))
+	if ready, _ := s.GetReadyTasks("p1"); strings.Join(taskIDs(ready), ",") != "a" {
+		t.Fatalf("approved task must be ready again, got %v", taskIDs(ready))
+	}
+
+	// Reject path: awaiting_approval -> failed (kind=rejected), terminal.
+	gated2 := nt("a")
+	gated2.RequiresApproval = true
+	mustCreatePlan(t, s, "p2", gated2)
+	must(s.ApprovePlan("p2"))
+	must(s.StartRun("p2", "run-2"))
+	must(s.RequestTaskApproval("p2", "a", "run-2"))
+	must(s.FailTask("p2", "a", "run-2", `{"kind":"rejected"}`))
+	st, err := s.PlanState("p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TaskStatus["a"] != TaskFailed {
+		t.Fatalf("rejected task status = %q, want failed", st.TaskStatus["a"])
+	}
+	if err := s.ApproveTask("p2", "a", "run-2"); err == nil {
+		t.Fatal("approving a rejected task should fail (terminal)")
+	}
+}
+
 // TestRetryTask: verify-fail retries go back to pending (clearing the dead
 // session), are rejected from invalid states, and the retry budget is
 // derived by counting task_retry events — correct even when retries

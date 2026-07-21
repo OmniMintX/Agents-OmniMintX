@@ -26,20 +26,24 @@ CREATE TABLE IF NOT EXISTS plans (
 -- empty). Older databases get the column via migrateTasksCheck (store.go).
 -- verify is the planner-chosen verify strategy, e.g. 'llm' (may be empty).
 -- Older databases get the column via migrateTasksVerify (store.go).
+-- requires_approval gates dispatch on task_approved (OM-12); the
+-- 'awaiting_approval' status is its pre-dispatch blocked state. Older
+-- databases get the column + rebuilt CHECK via migrateTasksApproval (store.go).
 CREATE TABLE IF NOT EXISTS tasks (
-    id            TEXT NOT NULL,
-    plan_id       TEXT NOT NULL REFERENCES plans(id),
-    title         TEXT NOT NULL,
-    prompt        TEXT NOT NULL,
-    harness       TEXT NOT NULL,
-    check_cmd     TEXT NOT NULL DEFAULT '',
-    verify        TEXT NOT NULL DEFAULT '',
-    status        TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','done','failed')),
-    ao_session_id TEXT,
-    branch        TEXT,
-    pr_url        TEXT,
-    created_at    TEXT NOT NULL,
+    id                TEXT NOT NULL,
+    plan_id           TEXT NOT NULL REFERENCES plans(id),
+    title             TEXT NOT NULL,
+    prompt            TEXT NOT NULL,
+    harness           TEXT NOT NULL,
+    check_cmd         TEXT NOT NULL DEFAULT '',
+    verify            TEXT NOT NULL DEFAULT '',
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','awaiting_approval','done','failed')),
+    ao_session_id     TEXT,
+    branch            TEXT,
+    pr_url            TEXT,
+    created_at        TEXT NOT NULL,
     PRIMARY KEY (id, plan_id)
 );
 

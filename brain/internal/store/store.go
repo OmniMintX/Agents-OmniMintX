@@ -59,6 +59,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateTasksApproval(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -100,6 +104,69 @@ func migrateTasksVerify(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN verify TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("migrate tasks verify: %w", err)
+	}
+	return nil
+}
+
+// migrateTasksApproval brings pre-OM-12 tasks tables up to date: it adds
+// the requires_approval column and — because SQLite cannot alter a CHECK
+// constraint — rebuilds tasks tables whose status CHECK does not allow
+// 'awaiting_approval'. Runs after migrateTasksCheck/migrateTasksVerify so
+// the copy can list check_cmd and verify unconditionally.
+func migrateTasksApproval(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&ddl)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("migrate tasks approval: read tasks ddl: %w", err)
+	}
+	if !strings.Contains(ddl, "requires_approval") {
+		if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate tasks approval: add column: %w", err)
+		}
+	}
+	if strings.Contains(ddl, "awaiting_approval") {
+		return nil
+	}
+	// FKs must be off so DROP TABLE does not trip the composite FKs from
+	// task_dependencies; PRAGMA is per-connection and the pool is capped
+	// at one connection.
+	stmts := []string{
+		`PRAGMA foreign_keys=OFF`,
+		`BEGIN IMMEDIATE`,
+		`CREATE TABLE tasks_new (
+		    id                TEXT NOT NULL,
+		    plan_id           TEXT NOT NULL REFERENCES plans(id),
+		    title             TEXT NOT NULL,
+		    prompt            TEXT NOT NULL,
+		    harness           TEXT NOT NULL,
+		    check_cmd         TEXT NOT NULL DEFAULT '',
+		    verify            TEXT NOT NULL DEFAULT '',
+		    requires_approval INTEGER NOT NULL DEFAULT 0,
+		    status            TEXT NOT NULL DEFAULT 'pending'
+		        CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','awaiting_approval','done','failed')),
+		    ao_session_id     TEXT,
+		    branch            TEXT,
+		    pr_url            TEXT,
+		    created_at        TEXT NOT NULL,
+		    PRIMARY KEY (id, plan_id)
+		)`,
+		`INSERT INTO tasks_new (id, plan_id, title, prompt, harness, check_cmd, verify, requires_approval, status, ao_session_id, branch, pr_url, created_at)
+		     SELECT id, plan_id, title, prompt, harness, check_cmd, verify, requires_approval, status, ao_session_id, branch, pr_url, created_at FROM tasks`,
+		`DROP TABLE tasks`,
+		`ALTER TABLE tasks_new RENAME TO tasks`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_plan ON tasks(plan_id)`,
+		`COMMIT`,
+		`PRAGMA foreign_keys=ON`,
+	}
+	for _, q := range stmts {
+		if _, execErr := db.Exec(q); execErr != nil {
+			db.Exec(`ROLLBACK`)
+			db.Exec(`PRAGMA foreign_keys=ON`)
+			return fmt.Errorf("migrate tasks approval: %w", execErr)
+		}
 	}
 	return nil
 }

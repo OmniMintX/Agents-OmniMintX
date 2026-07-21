@@ -8,18 +8,20 @@ import (
 )
 
 // taskJSON / planJSON mirror the fixed LLM output schema:
-// {"tasks":[{"title","prompt","harness","check","verify","depends_on":[]}]}.
+// {"tasks":[{"title","prompt","harness","check","verify","requires_approval","depends_on":[]}]}.
 // depends_on references other tasks by TITLE. check is the optional
 // deterministic tier-0 verification command run in the session worktree.
 // verify is the optional verify strategy (none|deterministic|llm); empty
-// defaults to deterministic.
+// defaults to deterministic. requires_approval is the optional approval
+// gate flag (OM-12); absent defaults to false.
 type taskJSON struct {
-	Title     string   `json:"title"`
-	Prompt    string   `json:"prompt"`
-	Harness   string   `json:"harness"`
-	Check     string   `json:"check,omitempty"`
-	Verify    string   `json:"verify,omitempty"`
-	DependsOn []string `json:"depends_on"`
+	Title            string   `json:"title"`
+	Prompt           string   `json:"prompt"`
+	Harness          string   `json:"harness"`
+	Check            string   `json:"check,omitempty"`
+	Verify           string   `json:"verify,omitempty"`
+	RequiresApproval bool     `json:"requires_approval,omitempty"`
+	DependsOn        []string `json:"depends_on"`
 }
 
 type planJSON struct {
@@ -56,13 +58,14 @@ func Parse(data []byte, allowedHarnesses []string) (*Plan, error) {
 			verify = "deterministic"
 		}
 		plan.Tasks[i] = Task{
-			ID:        idByTitle[t.Title],
-			Title:     t.Title,
-			Prompt:    t.Prompt,
-			Harness:   t.Harness,
-			Check:     strings.TrimSpace(t.Check),
-			Verify:    verify,
-			DependsOn: deps,
+			ID:               idByTitle[t.Title],
+			Title:            t.Title,
+			Prompt:           t.Prompt,
+			Harness:          t.Harness,
+			Check:            strings.TrimSpace(t.Check),
+			Verify:           verify,
+			RequiresApproval: t.RequiresApproval,
+			DependsOn:        deps,
 		}
 	}
 	return plan, nil

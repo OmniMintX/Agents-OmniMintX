@@ -18,15 +18,18 @@ const (
 // CreateSession HTTP call so a crash in between is detectable on resume.
 // "needs_human" pauses the task (and its timeout clock) until a human
 // unblocks the AO session; it is NOT a failure.
+// "awaiting_approval" blocks a requires_approval task BEFORE dispatch (no
+// AO session exists yet) until `om approve-task` records task_approved.
 const (
-	TaskPending     = "pending"
-	TaskReady       = "ready"
-	TaskDispatching = "dispatching"
-	TaskDispatched  = "dispatched"
-	TaskRunning     = "running"
-	TaskNeedsHuman  = "needs_human"
-	TaskDone        = "done"
-	TaskFailed      = "failed"
+	TaskPending          = "pending"
+	TaskReady            = "ready"
+	TaskDispatching      = "dispatching"
+	TaskDispatched       = "dispatched"
+	TaskRunning          = "running"
+	TaskNeedsHuman       = "needs_human"
+	TaskAwaitingApproval = "awaiting_approval"
+	TaskDone             = "done"
+	TaskFailed           = "failed"
 )
 
 // Brain event types.
@@ -46,6 +49,10 @@ const (
 	EventTaskFailed      = "task_failed"
 	EventTaskRetry       = "task_retry"     // {round, tier, reason, feedback}: verify fail -> back to pending for re-dispatch
 	EventAOUnreachable   = "ao_unreachable" // informational; no state change
+	// Approval-gate events (OM-12). A rejected task reuses task_failed with
+	// payload {kind: "rejected"} — no dedicated reject event.
+	EventTaskApprovalRequested = "task_approval_requested" // pending -> awaiting_approval, blocks dispatch
+	EventTaskApproved          = "task_approved"           // awaiting_approval -> pending (dispatchable again)
 	// Local-merge audit events (informational; git ancestry is the source
 	// of truth for merged-ness, these only record what the scheduler did).
 	EventTaskBranchMerged = "task_branch_merged" // {branch, sha}
@@ -70,30 +77,32 @@ type Plan struct {
 
 // Task is a stored task row plus its dependency IDs.
 type Task struct {
-	ID          string
-	PlanID      string
-	Title       string
-	Prompt      string
-	Harness     string
-	Check       string // tier-0 verify command from the planner (may be empty)
-	Verify      string // verify strategy from the planner, e.g. "llm" (may be empty)
-	Status      string
-	AOSessionID *string
-	Branch      *string // AO-assigned branch, e.g. ao/<sessionID>/root
-	PRURL       *string
-	DependsOn   []string
-	CreatedAt   time.Time
+	ID               string
+	PlanID           string
+	Title            string
+	Prompt           string
+	Harness          string
+	Check            string // tier-0 verify command from the planner (may be empty)
+	Verify           string // verify strategy from the planner, e.g. "llm" (may be empty)
+	RequiresApproval bool   // dispatch is gated on task_approved (OM-12)
+	Status           string
+	AOSessionID      *string
+	Branch           *string // AO-assigned branch, e.g. ao/<sessionID>/root
+	PRURL            *string
+	DependsOn        []string
+	CreatedAt        time.Time
 }
 
 // NewTask describes a task when creating a plan.
 type NewTask struct {
-	ID        string
-	Title     string
-	Prompt    string
-	Harness   string
-	Check     string // tier-0 verify command (may be empty)
-	Verify    string // verify strategy, e.g. "llm" (may be empty)
-	DependsOn []string
+	ID               string
+	Title            string
+	Prompt           string
+	Harness          string
+	Check            string // tier-0 verify command (may be empty)
+	Verify           string // verify strategy, e.g. "llm" (may be empty)
+	RequiresApproval bool   // dispatch is gated on task_approved (OM-12)
+	DependsOn        []string
 }
 
 // Event is one append-only brain_events row.

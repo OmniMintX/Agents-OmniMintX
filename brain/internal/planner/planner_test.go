@@ -150,6 +150,26 @@ func TestParseVerifyField(t *testing.T) {
 	}
 }
 
+// TestParseRequiresApprovalField: the optional approval-gate flag (OM-12)
+// carries through when present and defaults to false when absent
+// (back-compat with pre-OM-12 plans).
+func TestParseRequiresApprovalField(t *testing.T) {
+	fx := planFixture(t,
+		taskJSON{Title: "a", Prompt: okPrompt("A."), Harness: "codex", RequiresApproval: true},
+		taskJSON{Title: "b", Prompt: okPrompt("B."), Harness: "codex"},
+	)
+	plan, err := Parse([]byte(fx), testHarnesses)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !plan.Tasks[0].RequiresApproval {
+		t.Error("task a: requires_approval=true must carry through")
+	}
+	if plan.Tasks[1].RequiresApproval {
+		t.Error("task b: missing requires_approval must default to false")
+	}
+}
+
 // TestParseVerifyRejectsUnknown: any verify value outside the three allowed
 // strategies must fail validation with a clear error.
 func TestParseVerifyRejectsUnknown(t *testing.T) {
