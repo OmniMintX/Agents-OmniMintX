@@ -56,9 +56,9 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 3. **Approval gates tầng Overmind** — nâng cấp trên nền needs_human đã hoạt động.
 
 ### Thiết kế lõi
-- **Verify 3 tầng**: tầng 0 deterministic (diff không rỗng + lệnh check planner sinh per-task, miễn phí, bắt buộc); tầng 1 verifier LLM qua provider `cli` (verdict ghi `.om-verdict.<hex8>`); tầng 2 API provider (tùy chọn qua roles). Planner gán `verify: none | deterministic | llm` per task.
-- **Merge pipeline kiểu Intent**: `marker ok:` → verify tầng 0 → tầng 1 (nếu có) → **system-commit** (scheduler tự commit thay đổi worker bỏ sót) → local merge. Merge là bước cuối của chuỗi kiểm.
-- **Retry with feedback**: FAIL → re-dispatch worker kèm feedback verdict; `max_verify_rounds` mặc định 2; hết budget → needs_human (nhánh khác vẫn chạy).
+- **Verify 3 tầng**: tầng 0 deterministic (diff không rỗng + lệnh check planner sinh per-task, miễn phí, bắt buộc); tầng 1 verifier LLM qua provider `cli` (verdict ghi `.om-verdict.<hex8>` — *thiết kế gốc; hiện thực OM-10 dùng event `task_verdict {tier: 1}`, xem divergence bên dưới*); tầng 2 API provider (tùy chọn qua roles). Planner gán `verify: none | deterministic | llm` per task.
+- **Merge pipeline kiểu Intent**: `marker ok:` → verify tầng 0 → **system-commit** (scheduler tự commit thay đổi worker bỏ sót) → tầng 1 (nếu có) → local merge. Merge là bước cuối của chuỗi kiểm. (Hiện thực OM-10 đặt tầng 1 SAU system-commit để diff được chấm chứa cả công việc được rescue.)
+- **Retry with feedback**: FAIL → re-dispatch worker kèm feedback verdict; `max_verify_rounds` mặc định 2; hết budget → needs_human (*thiết kế gốc; hiện thực OM-10 fail với kind `verify_budget_exhausted`, xem divergence bên dưới*).
 - **Named providers + roles**: config v2 `providers.<tên>` + `roles.planner|verifier` → { provider, model }; tương thích ngược config cũ.
 - **Autonomy**: `SetWorkerPermissions` kiểu GET-merge-PUT trên AO project config (SetConfig của AO thay thế toàn bộ config — đã có bằng chứng source).
 - **Approval gates**: `requires_approval` chặn TRƯỚC dispatch, `om approve-task / reject-task`, notification macOS qua osascript.
@@ -71,8 +71,18 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 - **Wave 4**: OM-14 (E2E Phase 2, 5 kịch bản) → verifier độc lập → đóng Phase 2
 
 ### Trạng thái hiện tại (2026-07-21)
-- **Wave 1**: OM-13 **xong** (commit 8cfddb1), OM-8 **đang chạy**.
-- Các wave sau chưa bắt đầu.
+- **Wave 1**: OM-13 **DONE** (commit 8cfddb1), OM-8 **DONE** — config v2 named providers + roles (commit 188025e).
+- **Wave 2**: OM-9 **DONE** — verify tầng 0 + merge pipeline + system-commit (commit f355bb5). OM-10 **DONE** — verifier LLM tầng 1 + retry budget (commit 45c6fa5 wave 1 store/config + verifier package; 76f74f4 wave 2 planner/scheduler; verifier độc lập approve cả 2 wave, confidence High).
+- **Wave 3** (OM-11, OM-12) và Wave 4 (OM-14) chưa bắt đầu.
+
+#### OM-10 — những gì đã hiện thực
+- **Pipeline sau `ok:` marker**: `verify tầng 0 → system-commit → tầng 1 verifier LLM (chỉ task verify: llm) → local merge`. Tầng 1 chạy SAU system-commit để diff được chấm chứa cả công việc được rescue.
+- **Verifier tầng 1**: LLM call trực tiếp từ scheduler qua `roles.verifier` (không tạo AO session); diff ba-chấm (`gitops.DiffText`, cap **100KB** + notice khi cắt); verdict YAML binary `ok|fail` + reason + feedback có cấu trúc, parse chịu lỗi (bóc code fence, retry 1 lần). Plan có task `verify: llm` mà config thiếu `roles.verifier` → `om run` fail sớm với lỗi rõ.
+- **Retry with feedback**: verify fail (tầng 0 lẫn tầng 1) → kill session + event `task_retry {round, tier, reason, feedback}` → task về pending, re-dispatch session MỚI với prompt = prompt gốc + khối feedback + footer (tổng ≤ 4096 bytes; nếu chỗ cho feedback < 100 bytes thì thay bằng dòng ngắn `verification failed: <reason>`); displayName kèm round để dispatch idempotent per-round. Budget `max_verify_rounds` (mặc định 2) **đếm từ event log khi replay** — kill-resume không reset budget. Hết budget → `task_failed kind=verify_budget_exhausted`, nhánh khác vẫn chạy. Lỗi LLM transport không đốt budget (retry poll, 3 lần liên tiếp → `verify_error`).
+- **Schema/events mới**: event `task_retry`; event `task_verdict` thêm `tier: 1`; cột `tasks.verify` (planner gán `none|deterministic|llm` per task); config `max_verify_rounds` (env `OVERMIND_MAX_VERIFY_ROUNDS`).
+- **2 divergence CÓ CHỦ ĐÍCH so với thiết kế gốc ở trên**:
+  1. Verdict tầng 1 audit bằng event `task_verdict {tier: 1}` thay vì file `.om-verdict.<hex8>` — event log là audit trail đầy đủ và rẻ hơn (không cần agent/worktree ghi file).
+  2. Hết budget → `task_failed kind=verify_budget_exhausted` thay vì `needs_human` — session lúc đó đã terminated, `needs_human` sẽ loop vô hạn trong pollTask và chưa có đường human-unblock cho session chết; nâng cấp sau khi có human-in-the-loop resume.
 
 ## Nghiên cứu bên ngoài — herdr (đánh giá 2026-07-21)
 
@@ -209,4 +219,4 @@ git clone https://github.com/BloopAI/vibe-kanban.git
 
 ### 6. Workspace Intent
 - Spec + task notes Phase 2 nằm trong workspace agent-orchestrator — mở lại là có.
-- Việc dở dang duy nhất: OM-10 (verifier LLM + retry budget) — chưa có code, bắt đầu sạch từ HEAD.
+- OM-10 (verifier LLM + retry budget) đã xong và merge (45c6fa5 + 76f74f4); việc kế tiếp là Wave 3 (OM-11 autonomy, OM-12 approval gates).
