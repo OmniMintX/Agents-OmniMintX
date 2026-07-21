@@ -84,7 +84,8 @@ func newApproveCmd(cfgPath *string) *cobra.Command {
 }
 
 func newRunCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	var autonomy string
+	cmd := &cobra.Command{
 		Use:   "run <plan-id>",
 		Short: "Run an approved plan: dispatch sessions to the AO daemon until done/failed",
 		Args:  cobra.ExactArgs(1),
@@ -93,9 +94,12 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runRun(cfg, args[0])
+			return runRun(cfg, args[0], autonomy)
 		},
 	}
+	cmd.Flags().StringVar(&autonomy, "autonomy", "",
+		"override config autonomy: auto | accept-edits | bypass-permissions | off")
+	return cmd
 }
 
 func newStatusCmd(cfgPath *string) *cobra.Command {

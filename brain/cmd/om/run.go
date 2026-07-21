@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,7 +33,11 @@ func openStore(cfg config.Config) (*store.Store, error) {
 // runRun is `om run <plan-id>`: execute an approved plan against the AO
 // daemon until it is done or failed. Ctrl-C stops cleanly; re-running
 // resumes from the event log (dispatch is idempotent).
-func runRun(cfg config.Config, planID string) error {
+func runRun(cfg config.Config, planID, autonomyFlag string) error {
+	autonomy, err := resolveAutonomy(cfg, autonomyFlag)
+	if err != nil {
+		return err
+	}
 	st, err := openStore(cfg)
 	if err != nil {
 		return err
@@ -43,9 +49,19 @@ func runRun(cfg config.Config, planID string) error {
 	if err != nil {
 		return err
 	}
+	ao := aoclient.New(cfg.AOBaseURL)
+	if autonomy != config.AutonomyOff {
+		plan, err := st.GetPlan(planID)
+		if err != nil {
+			return fmt.Errorf("plan %s not found: %w", planID, err)
+		}
+		if err := ensureAutonomy(ctx, ao, plan.ProjectID, permissionForAutonomy(autonomy), os.Stdout); err != nil {
+			return err
+		}
+	}
 	s := &scheduler.Scheduler{
 		St:  st,
-		AO:  aoclient.New(cfg.AOBaseURL),
+		AO:  ao,
 		Git: gitops.Merger{},
 		Cfg: scheduler.Config{
 			MaxParallel:         cfg.MaxParallel,
@@ -66,6 +82,74 @@ func runRun(cfg config.Config, planID string) error {
 		}
 		return err
 	}
+	return nil
+}
+
+// resolveAutonomy returns the effective autonomy mode for this run: the
+// --autonomy flag when set, else the config knob. bypass-permissions
+// additionally requires the autonomy_allow_bypass opt-in in the config file
+// (there is no CLI flag for it) — workers run without a sandbox.
+func resolveAutonomy(cfg config.Config, flag string) (string, error) {
+	mode, err := config.NormalizeAutonomy(cfg.Autonomy)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(flag) != "" {
+		if mode, err = config.NormalizeAutonomy(flag); err != nil {
+			return "", err
+		}
+	}
+	if mode == config.AutonomyBypass && !cfg.AutonomyAllowBypass {
+		return "", errors.New("bypass-permissions chạy worker KHÔNG sandbox; chỉ bật khi hiểu rủi ro: set autonomy_allow_bypass: true trong ~/.overmind/config.yaml")
+	}
+	return mode, nil
+}
+
+// permissionForAutonomy maps a non-off autonomy mode onto AO's permission
+// vocabulary (the strings coincide, but the mapping is explicit on purpose).
+func permissionForAutonomy(mode string) aoclient.PermissionMode {
+	switch mode {
+	case config.AutonomyAcceptEdits:
+		return aoclient.PermissionAcceptEdits
+	case config.AutonomyBypass:
+		return aoclient.PermissionBypassPermissions
+	default:
+		return aoclient.PermissionAuto
+	}
+}
+
+// projectConfigAPI is the slice of *aoclient.Client that ensureAutonomy
+// needs, so tests can stub the AO daemon.
+type projectConfigAPI interface {
+	GetProjectConfig(ctx context.Context, projectID string) (aoclient.ProjectConfig, error)
+	UpdateProjectConfig(ctx context.Context, projectID string, cfg aoclient.ProjectConfig) (aoclient.Project, error)
+}
+
+// ensureAutonomy sets the project's agentConfig.permissions to want, once,
+// before any dispatch. AO's PUT replaces the stored config wholesale, so the
+// flow is mandatory: GET the config, mutate only permissions, PUT the whole
+// object back (aoclient round-trips unmodeled fields losslessly). Idempotent —
+// already at want means no PUT. Any GET/PUT error aborts the run: never
+// dispatch with an unknown permission state.
+func ensureAutonomy(ctx context.Context, ao projectConfigAPI, projectID string, want aoclient.PermissionMode, logw io.Writer) error {
+	pc, err := ao.GetProjectConfig(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("autonomy: get project %s config: %w", projectID, err)
+	}
+	old := pc.AgentConfig.Permissions
+	if old == want {
+		fmt.Fprintf(logw, "autonomy: đã ở %s\n", want)
+		return nil
+	}
+	pc.AgentConfig.Permissions = want
+	if _, err := ao.UpdateProjectConfig(ctx, projectID, pc); err != nil {
+		return fmt.Errorf("autonomy: set project %s permissions %s: %w", projectID, want, err)
+	}
+	oldLabel := string(old)
+	if oldLabel == "" {
+		oldLabel = "(unset)"
+	}
+	fmt.Fprintf(logw, "autonomy: project %s permissions %s → %s\n", projectID, oldLabel, want)
 	return nil
 }
 

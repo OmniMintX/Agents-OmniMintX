@@ -60,3 +60,21 @@ no_signal_timeout_min: 10
 # Max verify-retry rounds per task (0 = fail immediately on verify fail).
 # env: OVERMIND_MAX_VERIFY_ROUNDS
 max_verify_rounds: 2
+
+# Autonomy: permission mode `om run` sets on the AO project config before
+# dispatching workers (override per run: om run --autonomy=...).
+#   auto               - (default) agent classifies each action and auto-approves safe ones
+#   accept-edits       - auto-approve file edits; unfamiliar bash commands still ask
+#   bypass-permissions - approve EVERYTHING (requires autonomy_allow_bypass below)
+#   off                - never touch the project config (pre-OM-11 behavior)
+# Side-effect: the permission change persists on the AO project after om run
+# exits (no restore). Revert manually with PUT /api/v1/projects/{id}/config.
+# env: OVERMIND_AUTONOMY
+autonomy: auto
+
+# Extra opt-in guard for bypass-permissions: there is NO sandbox — workers can
+# run any command without approval. Only set true when you accept that risk
+# (e.g. disposable VM). There is deliberately no CLI flag for this; even
+# `om run --autonomy=bypass-permissions` is refused while this is false.
+# env: OVERMIND_AUTONOMY_ALLOW_BYPASS
+autonomy_allow_bypass: false

@@ -270,3 +270,52 @@ func TestIsLocalBaseURL(t *testing.T) {
 		}
 	}
 }
+
+func TestAutonomyValidValues(t *testing.T) {
+	for _, v := range []string{AutonomyAuto, AutonomyAcceptEdits, AutonomyBypass, AutonomyOff} {
+		cfg, err := Load(writeConfig(t, "autonomy: "+v+"\n"))
+		if err != nil {
+			t.Fatalf("Load(autonomy=%s): %v", v, err)
+		}
+		if cfg.Autonomy != v {
+			t.Errorf("Autonomy = %q, want %q", cfg.Autonomy, v)
+		}
+		if cfg.AutonomyAllowBypass {
+			t.Errorf("AutonomyAllowBypass must default to false")
+		}
+	}
+}
+
+func TestAutonomyEmptyDefaultsToAuto(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Autonomy != AutonomyAuto {
+		t.Errorf("default Autonomy = %q, want %q", cfg.Autonomy, AutonomyAuto)
+	}
+	cfg, err = Load(writeConfig(t, "autonomy: \"\"\n"))
+	if err != nil {
+		t.Fatalf("Load(autonomy empty): %v", err)
+	}
+	if cfg.Autonomy != AutonomyAuto {
+		t.Errorf("empty Autonomy = %q, want %q", cfg.Autonomy, AutonomyAuto)
+	}
+}
+
+func TestAutonomyUnknownRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, "autonomy: yolo\n"))
+	if err == nil || !strings.Contains(err.Error(), "autonomy") {
+		t.Fatalf("Load(autonomy=yolo) err = %v, want unknown-autonomy error", err)
+	}
+}
+
+func TestAutonomyAllowBypassFromFile(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "autonomy: bypass-permissions\nautonomy_allow_bypass: true\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Autonomy != AutonomyBypass || !cfg.AutonomyAllowBypass {
+		t.Errorf("cfg = autonomy %q allowBypass %v", cfg.Autonomy, cfg.AutonomyAllowBypass)
+	}
+}

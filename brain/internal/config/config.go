@@ -18,7 +18,7 @@ import (
 // declare `providers` + `roles` instead; a config that only has this block
 // is auto-migrated to the "default" provider profile with a warning.
 type LLM struct {
-	Provider      string   `yaml:"provider"`        // anthropic | openai | cli (empty = auto-detect)
+	Provider      string   `yaml:"provider"` // anthropic | openai | cli (empty = auto-detect)
 	Model         string   `yaml:"model"`
 	APIKeyEnv     string   `yaml:"api_key_env"`     // env var holding the API key (empty = provider default)
 	BaseURL       string   `yaml:"base_url"`        // openai provider: API base, e.g. https://api.deepseek.com
@@ -56,7 +56,9 @@ type Config struct {
 	TaskTimeoutMin         int                 `yaml:"task_timeout_min"`
 	NoSignalTimeoutMin     int                 `yaml:"no_signal_timeout_min"`
 	IdleNoMarkerTimeoutMin int                 `yaml:"idle_no_marker_timeout_min"`
-	MaxVerifyRounds        int                 `yaml:"max_verify_rounds"` // retry budget per task on verify fail (0 = no retries)
+	MaxVerifyRounds        int                 `yaml:"max_verify_rounds"`     // retry budget per task on verify fail (0 = no retries)
+	Autonomy               string              `yaml:"autonomy"`              // permission mode om run sets on the AO project before dispatch (see NormalizeAutonomy)
+	AutonomyAllowBypass    bool                `yaml:"autonomy_allow_bypass"` // explicit opt-in required for autonomy=bypass-permissions (workers run unsandboxed)
 
 	// Warnings collected while loading (e.g. legacy-config migration notice).
 	// Not part of the YAML schema; callers should surface them to the user.
@@ -104,7 +106,32 @@ func Default() (Config, error) {
 		NoSignalTimeoutMin:     10,
 		IdleNoMarkerTimeoutMin: 10,
 		MaxVerifyRounds:        2,
+		Autonomy:               AutonomyAuto,
 	}, nil
+}
+
+// Autonomy modes: the permission mode `om run` sets on the AO project config
+// before dispatching workers (cmd/om/run.go). AutonomyOff leaves the project
+// config untouched (pre-OM-11 behavior).
+const (
+	AutonomyAuto        = "auto"
+	AutonomyAcceptEdits = "accept-edits"
+	AutonomyBypass      = "bypass-permissions"
+	AutonomyOff         = "off"
+)
+
+// NormalizeAutonomy validates an autonomy value and returns its canonical
+// form. Empty means AutonomyAuto (the default); anything outside the four
+// known modes is an error.
+func NormalizeAutonomy(v string) (string, error) {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "":
+		return AutonomyAuto, nil
+	case AutonomyAuto, AutonomyAcceptEdits, AutonomyBypass, AutonomyOff:
+		return s, nil
+	default:
+		return "", fmt.Errorf("unknown autonomy %q (expected auto, accept-edits, bypass-permissions or off)", v)
+	}
 }
 
 // Load reads config from path (default: ~/.overmind/config.yaml when empty),
@@ -202,6 +229,11 @@ func validate(cfg *Config) error {
 	if cfg.MaxVerifyRounds < 0 {
 		return fmt.Errorf("max_verify_rounds must be >= 0, got %d", cfg.MaxVerifyRounds)
 	}
+	autonomy, err := NormalizeAutonomy(cfg.Autonomy)
+	if err != nil {
+		return err
+	}
+	cfg.Autonomy = autonomy
 	for name, p := range cfg.Providers {
 		switch strings.ToLower(strings.TrimSpace(p.Type)) {
 		case "", "auto", "anthropic", "cli", "openai", "openai-compatible":
@@ -270,6 +302,8 @@ func applyEnv(cfg *Config) {
 	envInt("OVERMIND_NO_SIGNAL_TIMEOUT_MIN", &cfg.NoSignalTimeoutMin)
 	envInt("OVERMIND_IDLE_NO_MARKER_TIMEOUT_MIN", &cfg.IdleNoMarkerTimeoutMin)
 	envInt("OVERMIND_MAX_VERIFY_ROUNDS", &cfg.MaxVerifyRounds)
+	envStr("OVERMIND_AUTONOMY", &cfg.Autonomy)
+	envBool("OVERMIND_AUTONOMY_ALLOW_BYPASS", &cfg.AutonomyAllowBypass)
 }
 
 func envStr(key string, dst *string) {
@@ -282,6 +316,14 @@ func envInt(key string, dst *int) {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			*dst = n
+		}
+	}
+}
+
+func envBool(key string, dst *bool) {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			*dst = b
 		}
 	}
 }
