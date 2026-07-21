@@ -268,3 +268,60 @@ Thiết kế được verify: local git merge thay PR (gitops.Merger), marker
 3. **Chuỗi merge-trước-dispatch hoạt động đúng như thiết kế**: verdict ok →
    merge local → FinishTask → con dispatch từ main đã chứa code cha. Fail
    marker → không merge, main sạch. Timeout no_signal kill đúng.
+
+
+---
+
+## Nhật ký chạy thật — lần 4, 2026-07-21 (máy mới)
+
+**Verdict: PASS** — tái lập nguyên kịch bản lần 3 trên máy mới (Mac mini,
+AO 0.10.3, claude CLI 2.1.205, om build từ HEAD 49c3060): chaining A→B sống,
+merge local đúng, marker ok, plan done trong ~4 phút. Không có fix code nào.
+
+### GATE — kết quả thật
+- Daemon UP sẵn: `GET /api/v1/projects` = 200, danh sách project RỖNG (máy mới).
+- `which claude` OK (2.1.205); KHÔNG có `~/.overmind/config.yaml` — defaults
+  auto-detect `cli/claude` cho planner hoạt động đúng, không cần config file.
+- `go build -o /tmp/om ./cmd/om` sạch.
+
+### Đăng ký project — lưu ý schema
+- Body `{"id":…}` bị 400 `INVALID_JSON` — daemon strict-decode `AddProjectInput`:
+  field đúng là **`projectId`** (kèm `path`, `name`), không phải `id` như dòng
+  "(id/name/path)" ở mục kịch bản phía trên gợi ý. Gửi đúng schema → 201,
+  project `om-e2e-1784638812` (kind single_repo, defaultBranch main).
+
+### Kịch bản chính A→B — plan p-3c2f9f87 (repo /tmp/om-e2e-1784638812): PASS
+- Repo mới: `.claude/settings.json` (acceptEdits + allowlist git/cat/ls/… +
+  deny curl/wget/rm -rf/sudo) commit 6ea09b9 TRƯỚC khi plan. Plan t1→t2
+  (planner cli/claude, ~8s), approve, `om run` (run-1baa501f0bf7, 20:01→20:05).
+- t1 (om-e2e-1784638812-1): kẹt trust-folder dialog đúng caveat lần 3
+  ("pre-approves 18 tool permissions… Do you trust?") → needs_human; gửi
+  Enter 1 lần qua tmux → resumed. Agent chạy lệnh compound
+  `pwd && git -C . rev-parse … && git status --porcelain` (compound không khớp
+  allowlist prefix) → thêm 1 prompt approval (chọn "don't ask again") — tái
+  lập phát hiện lần 3: allowlist tĩnh không đủ. Sau đó agent commit
+  `greeting.txt` (4f8af82), marker `ok:`.
+- Điểm MỚI so với lần 3: build hiện tại có **tier-0 verify** — event
+  `task_verdict {"tier":0,"verdict":"pass"}` trước `task_branch_merged`
+  cho cả 2 task.
+- Scheduler: verdict pass → merge local `ao/…-1/root` vào main (78b370aa) →
+  task_done(t1) → dispatch t2.
+- t2 (om-e2e-1784638812-2): chạy **không cần bấm gì** (trust đã có, không dùng
+  lệnh ngoài allowlist — giống hệt lần 3). Đọc `greeting.txt` từ main thật,
+  tạo `reply.txt` = `reply to: hello-om-e2e-1784638812` (TRÍCH đúng), commit
+  3665f17, marker `ok:` → merge e28f8578 → plan done.
+- Verify: `git show main:greeting.txt` = `hello-om-e2e-1784638812`;
+  `git show main:reply.txt` = `reply to: hello-om-e2e-1784638812`. Events đúng
+  thứ tự: plan_created→approved→run_started→dispatched(t1)→started→
+  needs_human→resumed→task_verdict(t1)→task_branch_merged(t1)→task_done(t1)→
+  dispatched(t2)→started→task_verdict(t2)→task_branch_merged(t2)→
+  task_done(t2)→plan_done. `om status`: cả 2 task done.
+
+### Không chạy lại trong lần 4
+- Kịch bản fail thật và kịch bản resume/stale-lock (đã PASS lần 3, không thuộc
+  scope smoke máy mới).
+
+### Dọn dẹp
+- `om run` tự thoát exit 0 khi plan done; không còn process `om run` hay tmux
+  session nào; 2 session AO đều terminated. Repo /tmp/om-e2e-1784638812 giữ
+  lại làm hiện trường.
