@@ -127,6 +127,33 @@ for r in rust-lang/bors SWE-bench/SWE-bench dbos-inc/dbos-transact-golang sentie
 ```
 
 
+## Deep-research: state-of-the-art multi-agent coding orchestration (2026-07-21)
+
+Kết quả nghiên cứu internet có kiểm chứng đối kháng (mỗi claim bị 3 verifier độc lập tìm cách bác bỏ, ≥2/3 phiếu bác thì loại; nguồn đều được fetch trực tiếp ngày 21/07/2026). 10 kết luận sống sót, nhóm theo tác động vào Overmind:
+
+### Verification (→ OM-10)
+1. **Trained critic + best-of-N là pattern verify mạnh nhất đã chứng minh** (confidence: high): OpenHands đạt 66.4% SWE-bench Verified (từ 60.6% single-rollout) bằng 5 rollouts + critic model fine-tuned (Qwen 2.5 Coder 32B, regression head, reward từ unit-test pass) chọn trajectory tốt nhất — KHÔNG đổi scaffold. Họ thấy cách này hiệu quả hơn LLM-as-judge dạng prompt (generalize kém ngoài benchmark). Chi phí ~5x inference cho ~6 điểm, scale log-linear. [Nguồn](https://www.openhands.dev/blog/sota-on-swe-bench-verified-with-inference-time-scaling-and-critic-model)
+   - **Ý nghĩa cho OM-10**: verifier LLM dạng prompt (thiết kế hiện tại) là bước đúng nhưng đừng kỳ vọng quá — ưu tiên tầng 0 deterministic (test-based) làm trụ, LLM verdict chỉ bổ trợ. Best-of-N per-task là hướng nâng cấp sau (đắt 5x).
+2. **UI-orchestrator (vibe-kanban, crystal) verify thuần human-in-the-loop** (high): diff review tay + run script tay, không verifier LLM, không test gating. → Tier-0 verify hiện tại của Overmind đã VƯỢT nhóm này; hướng phải đuổi là critic model + merge-queue gates, không phải ngang hàng UI tools.
+
+### Merge/integration (→ Phase 3, diamond DAG)
+3. **Gas Town gộp verify + integration vào một cơ chế: merge queue kiểu Bors có bisect** (high): batch các MR, chạy verification gate trên stack đã merge; xanh → merge cả batch; đỏ → bisect cô lập MR hỏng, land phần tốt; agent không bao giờ push thẳng main; MR fail được fix inline hoặc re-dispatch. Đây là thiết kế merge-queue khớp nhất với pipeline tier-0-verify-then-merge của Overmind. Caveat: là thiết kế của tác giả (Steve Yegge), chưa có benchmark độc lập. [gastown](https://github.com/steveyegge/gastown)
+4. **Worktree isolation là pattern hội tụ toàn ngành** (high): gastown (hooks sống sót crash), vibe-kanban (workspace = worktree + branch + terminal), crystal, và Claude Code native (`claude --worktree`). AO đã cho Overmind cái này miễn phí — đúng hướng.
+5. **Ngoài Gas Town, KHÔNG ai tự động merge-back** (medium): vibe-kanban đi đường PR + người review; crystal squash-rebase tay; docs worktree của Claude Code không nói gì về merge-back. → **Local merge tự động của Overmind là differentiator thật**; lộ trình tiến hóa: merge tuần tự hiện tại → batched/bisecting queue kiểu Refinery khi mở diamond DAG.
+
+### Autonomy/permissions (→ OM-11) — toàn bộ từ docs chính thức Claude Code, verify nguyên văn
+6. **`--dangerously-skip-permissions` PHẢI nằm trong container/VM/sandbox** (high): khi tắt prompt, isolation boundary là lớp bảo vệ duy nhất. Reference pattern chính thức: dev container + iptables egress default-deny + non-root (flag bị chặn khi chạy root/sudo; check này tự bỏ qua trong sandbox được nhận diện). [sandbox-environments](https://code.claude.com/docs/en/sandbox-environments)
+7. **"Auto mode" là lựa chọn mới nhẹ hơn skip-permissions** (high): thay prompt bằng classifier per-action (chặn escalation, target lạ, hành động do content độc điều khiển); isolation được khuyến nghị nhưng không bắt buộc. → Ứng viên tốt cho OM-11 qua AO `--permission-mode`.
+8. **Sandboxed Bash tool (Seatbelt/bubblewrap) chỉ trói Bash** (high): MCP server/hooks chạy tự do trên host → một mình nó KHÔNG đủ cho unattended. Có escape hatch documented (retry với `dangerouslyDisableSandbox`) — orchestrator phải khóa bằng `"allowUnsandboxedCommands": false`.
+9. **Lỗ hổng exfiltration documented**: proxy allowlist của sandbox không terminate TLS mặc định → domain fronting thoát được allowlist; entry rộng (github.com) tự nó là đường exfil. Threat model mạnh cần TLS-terminating proxy (`network.tlsTerminate`, experimental v2.1.199+). [sandboxing](https://code.claude.com/docs/en/sandboxing)
+10. **3 cơ chế permission phân bậc cho headless `claude -p`** (high): (a) `--allowedTools` với prefix rule (`Bash(git diff *)`); (b) `acceptEdits` — auto-approve write + mkdir/touch/mv/cp, bash/network khác vẫn cần allow rule, **không có thì run non-interactive ABORT**; (c) `dontAsk` — deny-by-default cho CI khóa chặt. Abort-on-unapproved là failure mode cụ thể mà crash-resume của Overmind phải xử lý (scheduler sẽ thấy session chết không marker → hiện ra là `marker_missing`/`no_signal`). [headless](https://code.claude.com/docs/en/headless)
+
+### Khuyến nghị rút ra cho Phase 2 (thứ tự hành động)
+- **OM-11**: chọn 2 nấc — mặc định `acceptEdits`/auto-mode qua AO project config (đã verify PUT hoạt động ở E2E lần 2); nấc full-auto (`bypass-permissions`) CHỈ khi session nằm trong sandbox-runtime/container, khóa `allowUnsandboxedCommands:false`, và hiểu giới hạn TLS/domain-fronting nếu bật network.
+- **OM-10**: giữ tier 0 (test/check-based) làm cổng chính; verifier LLM prompt-based là tín hiệu bổ trợ, không phải cổng duy nhất — bằng chứng OpenHands cho thấy prompt-judge generalize kém.
+- **Phase 3 merge queue**: học Refinery của gastown (đã có source trong docs/repo/) — batch + test-merged-stack + bisect; đó là điều kiện mở diamond DAG.
+- **2 câu hỏi chưa có kết luận sống sót qua kiểm chứng** (cần nghiên cứu tiếp): re-planning/budget control giữa chừng, và postmortem thất bại công khai của các hệ orchestrator.
+
 ## Checklist dựng lại môi trường trên máy mới (2026-07-21)
 
 ### 1. Clone repo
