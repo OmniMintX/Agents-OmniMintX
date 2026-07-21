@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 var ctx = context.Background()
@@ -207,6 +209,82 @@ func TestMergeRecoversLeftoverTempWorktree(t *testing.T) {
 	res, err := Merger{}.Merge(ctx, repo, "feat-a", "main", "m")
 	if err != nil || !res.Merged {
 		t.Fatalf("merge with leftover temp dir: %+v, %v", res, err)
+	}
+}
+
+// TestMergeConcurrentSameRepo: two om processes merging different branches
+// into the same repo (two plans on one repo) must serialize on the per-repo
+// lock and BOTH succeed — not fail hard on git's index.lock.
+func TestMergeConcurrentSameRepo(t *testing.T) {
+	repo := newRepo(t)
+	addBranch(t, repo, "feat-b", "b.txt", "B\n")
+	addBranch(t, repo, "feat-c", "c.txt", "C\n")
+	var wg sync.WaitGroup
+	results := make([]MergeResult, 2)
+	errs := make([]error, 2)
+	for i, br := range []string{"feat-b", "feat-c"} {
+		wg.Add(1)
+		go func(i int, br string) {
+			defer wg.Done()
+			results[i], errs[i] = Merger{}.Merge(ctx, repo, br, "main", "m "+br)
+		}(i, br)
+	}
+	wg.Wait()
+	for i := range results {
+		if errs[i] != nil || !results[i].Merged || results[i].Blocked != "" || results[i].Conflict != "" {
+			t.Fatalf("concurrent merge %d: %+v, %v", i, results[i], errs[i])
+		}
+	}
+	if git(t, repo, "show", "main:b.txt") != "B" || git(t, repo, "show", "main:c.txt") != "C" {
+		t.Fatal("main must contain both concurrently merged branches")
+	}
+}
+
+// TestMergeBlockedWhileRepoLockHeld: a foreign holder keeping the repo lock
+// past the wait window must surface as transient Blocked, never an error.
+func TestMergeBlockedWhileRepoLockHeld(t *testing.T) {
+	repo := newRepo(t)
+	addBranch(t, repo, "feat-a", "a.txt", "A\n")
+	orig := repoLockWait
+	repoLockWait = 50 * time.Millisecond
+	t.Cleanup(func() { repoLockWait = orig })
+	held, err := acquireRepoLock(ctx, repo)
+	if err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
+	defer releaseRepoLock(held)
+	res, err := Merger{}.Merge(ctx, repo, "feat-a", "main", "m")
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if res.Blocked == "" || res.Merged {
+		t.Fatalf("want blocked while repo lock held, got %+v", res)
+	}
+}
+
+// TestAbortOwnMergeGuard: the post-failure abort must only kill a merge
+// whose MERGE_HEAD == tip of OUR branch; a merge started by someone else in
+// the failure->abort window (TOCTOU) is left untouched.
+func TestAbortOwnMergeGuard(t *testing.T) {
+	repo := newRepo(t)
+	addBranch(t, repo, "user-b", "same.txt", "B\n")
+	addBranch(t, repo, "user-c", "same.txt", "C\n")
+	git(t, repo, "merge", "--no-ff", "--no-edit", "refs/heads/user-b")
+	cmd := exec.Command("git", "-C", repo, "merge", "--no-ff", "--no-edit", "refs/heads/user-c")
+	_ = cmd.Run() // conflicts; leaves MERGE_HEAD == tip(user-c)
+
+	abortOwnMerge(ctx, repo, "user-b") // foreign relative to user-b
+	if git(t, repo, "rev-parse", "--verify", "MERGE_HEAD") == "" {
+		t.Fatal("foreign MERGE_HEAD must survive abortOwnMerge")
+	}
+
+	abortOwnMerge(ctx, repo, "user-c") // ours: aborted
+	check := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	if check.Run() == nil {
+		t.Fatal("own MERGE_HEAD must be aborted")
+	}
+	if git(t, repo, "status", "--porcelain") != "" {
+		t.Fatal("tree must be clean after aborting our own merge")
 	}
 }
 

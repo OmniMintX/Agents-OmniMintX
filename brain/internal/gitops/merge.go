@@ -100,8 +100,18 @@ func (Merger) HasRemoteBranch(ctx context.Context, repo, branch string) (bool, e
 // Already-ancestor is an idempotent no-op. If target is checked out in
 // some worktree the merge runs in place (clean tree required, else
 // Blocked); otherwise a deterministic temp worktree is used and removed
-// afterwards (leftovers from a crash are recovered first).
+// afterwards (leftovers from a crash are recovered first). The whole call
+// holds the per-repo lock so concurrent om processes serialize instead of
+// racing git's index.lock (lock busy too long -> Blocked, retried).
 func (m Merger) Merge(ctx context.Context, repo, branch, target, msg string) (MergeResult, error) {
+	lock, err := acquireRepoLock(ctx, repo)
+	if errors.Is(err, errRepoLockBusy) {
+		return MergeResult{Blocked: fmt.Sprintf("repo %s is locked by another om merge", repo)}, nil
+	}
+	if err != nil {
+		return MergeResult{}, err
+	}
+	defer releaseRepoLock(lock)
 	merged, err := m.IsMerged(ctx, repo, branch, target)
 	if err != nil {
 		return MergeResult{}, err
@@ -152,7 +162,7 @@ func mergeAt(ctx context.Context, dir, branch, target, msg string, temp bool) (M
 	}
 	out, err := run(ctx, dir, "merge", "--no-ff", "--no-edit", "-m", msg, "refs/heads/"+branch)
 	if err != nil {
-		_, _ = run(ctx, dir, "merge", "--abort")
+		abortOwnMerge(ctx, dir, branch)
 		if strings.Contains(strings.ToLower(out), "conflict") {
 			return MergeResult{Conflict: out}, nil
 		}
@@ -163,6 +173,23 @@ func mergeAt(ctx context.Context, dir, branch, target, msg string, temp bool) (M
 		return MergeResult{}, err
 	}
 	return MergeResult{SHA: sha, Merged: true}, nil
+}
+
+// abortOwnMerge aborts an in-progress merge only when MERGE_HEAD proves it
+// is OURS (== tip of branch): between our failed merge and the abort some
+// other actor may have started a merge of their own (TOCTOU), and that one
+// must never be destroyed. No MERGE_HEAD means our merge failed before
+// starting — nothing to abort.
+func abortOwnMerge(ctx context.Context, dir, branch string) {
+	mh, err := run(ctx, dir, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	if err != nil {
+		return
+	}
+	tip, err := run(ctx, dir, "rev-parse", "refs/heads/"+branch)
+	if err != nil || mh != tip {
+		return
+	}
+	_, _ = run(ctx, dir, "merge", "--abort")
 }
 
 // recoverMergeHead handles a MERGE_HEAD left in dir by a crash: if it is

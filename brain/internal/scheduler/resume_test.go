@@ -5,7 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/OmniMintX/overmind/internal/aoclient"
 	"github.com/OmniMintX/overmind/internal/store"
 )
 
@@ -100,5 +102,88 @@ func TestRunLockContention(t *testing.T) {
 	}
 	if got := planStatus(t, st); got != store.PlanDone {
 		t.Fatalf("plan status = %s, want done", got)
+	}
+}
+
+// TestBackoffSleepChunksAndHeartbeats: a long AO outage must not leave the
+// run-lock heartbeat stale (MaxBackoff == LockStaleAfter == 60s): backoff
+// sleeps are chunked to LockStaleAfter/3 so heartbeats keep flowing, and
+// the plan still finishes once AO is back.
+func TestBackoffSleepChunksAndHeartbeats(t *testing.T) {
+	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	created := false
+	ao.onCreate = func(f *fakeAO, _ aoclient.SpawnSessionRequest) {
+		if !created {
+			created = true
+			f.failGets = 8 // backoff walks 2,4,8,16,32,60,60,60 — well past LockStaleAfter
+		}
+	}
+	step := Config{}.withDefaults().LockStaleAfter / 3
+	var sleeps []time.Duration
+	base := s.Sleep
+	s.Sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		return base(ctx, d)
+	}
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := planStatus(t, st); got != store.PlanDone {
+		t.Fatalf("plan status = %s, want done", got)
+	}
+	chunked := false
+	for _, d := range sleeps {
+		if d > step {
+			t.Fatalf("slept %s in one go — heartbeat gap exceeds LockStaleAfter/3 (%s)", d, step)
+		}
+		if d == step {
+			chunked = true
+		}
+	}
+	if !chunked {
+		t.Fatalf("no backoff sleep was chunked to %s; sleeps = %v", step, sleeps)
+	}
+}
+
+// TestBackoffLockStolenStops: losing the run lock mid-backoff must be
+// detected by the in-backoff heartbeat — the runner stops before sleeping
+// any further chunk (a stolen lock means another om run is live; sleeping
+// on and ticking again would double-drive the plan).
+func TestBackoffLockStolenStops(t *testing.T) {
+	st, ao, s := newHarness(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	created := false
+	ao.onCreate = func(f *fakeAO, _ aoclient.SpawnSessionRequest) {
+		if !created {
+			created = true
+			f.failGets = 1000 // outage never ends
+		}
+	}
+	step := Config{}.withDefaults().LockStaleAfter / 3
+	stolen := false
+	sleepsAfterSteal := 0
+	base := s.Sleep
+	s.Sleep = func(ctx context.Context, d time.Duration) error {
+		if stolen {
+			sleepsAfterSteal++
+		} else if d == step {
+			// First chunk of a long backoff: lose the lock during the sleep.
+			stolen = true
+			if err := st.ReleaseRunLock("plan-1", s.PID); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			if _, err := st.AcquireRunLock("plan-1", 99999, time.Minute); err != nil {
+				t.Fatalf("steal: %v", err)
+			}
+		}
+		return base(ctx, d)
+	}
+	err := s.Run(context.Background(), "plan-1")
+	if err == nil || !strings.Contains(err.Error(), "run lock") {
+		t.Fatalf("want run-lock error after steal, got %v", err)
+	}
+	if sleepsAfterSteal != 0 {
+		t.Fatalf("runner slept %d more times after losing the lock — in-backoff heartbeat missing", sleepsAfterSteal)
 	}
 }

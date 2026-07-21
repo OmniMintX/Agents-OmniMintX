@@ -132,7 +132,7 @@ func (r *runner) loop(ctx context.Context) error {
 				backoff = r.Cfg.MaxBackoff
 			}
 			r.logf("plan %s: AO unreachable, retrying in %s", r.plan.ID, backoff)
-			if err := r.Sleep(ctx, backoff); err != nil {
+			if err := r.sleepHeartbeat(ctx, backoff); err != nil {
 				return err
 			}
 			continue
@@ -152,6 +152,31 @@ func (r *runner) loop(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// sleepHeartbeat sleeps d in chunks of LockStaleAfter/3, refreshing the
+// run-lock heartbeat between chunks: a long outage backoff (MaxBackoff ==
+// LockStaleAfter by default) must not let a second om run presume this
+// live process dead and steal the lock. A failed heartbeat means the lock
+// WAS stolen — stop immediately, same as the loop-top heartbeat.
+func (r *runner) sleepHeartbeat(ctx context.Context, d time.Duration) error {
+	step := r.Cfg.LockStaleAfter / 3
+	if step <= 0 {
+		step = d
+	}
+	for d > 0 {
+		c := min(d, step)
+		if err := r.Sleep(ctx, c); err != nil {
+			return err
+		}
+		if d -= c; d <= 0 {
+			return nil
+		}
+		if err := r.St.HeartbeatRunLock(r.plan.ID, r.PID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkCompletion derives the plan outcome: all tasks done -> plan_done;
