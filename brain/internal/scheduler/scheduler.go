@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"time"
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
@@ -51,13 +52,18 @@ type AO interface {
 	PreviewFile(ctx context.Context, sessionID, filePath string) (string, bool, error)
 }
 
-// LocalMerger is the git surface the scheduler needs for chaining.
-// gitops.Merger satisfies it; tests substitute a fake.
+// LocalMerger is the git surface the scheduler needs for chaining and the
+// tier-0 verify + system-commit pipeline. gitops.Merger satisfies it;
+// tests substitute a fake.
 type LocalMerger interface {
 	IsMerged(ctx context.Context, repo, branch, target string) (bool, error)
 	Merge(ctx context.Context, repo, branch, target, msg string) (gitops.MergeResult, error)
 	DefaultBranch(ctx context.Context, repo string) (string, error)
 	HasRemoteBranch(ctx context.Context, repo, branch string) (bool, error)
+	WorktreeFor(ctx context.Context, repo, branch string) (string, error)
+	HasDiff(ctx context.Context, repo, branch, base string) (bool, error)
+	HasUncommitted(ctx context.Context, dir string, exclude []string) (bool, error)
+	CommitWorktree(ctx context.Context, dir, msg string, exclude []string) (gitops.CommitResult, error)
 }
 
 // Config are the scheduler knobs (from ~/.overmind/config.yaml).
@@ -69,6 +75,7 @@ type Config struct {
 	IdleNoMarkerTimeout time.Duration // idle without the done marker (default 10m)
 	LockStaleAfter      time.Duration // run-lock heartbeat freshness (default 60s)
 	MaxBackoff          time.Duration // AO-unreachable backoff cap (default 60s)
+	CheckTimeout        time.Duration // tier-0 check command budget (default 5m)
 }
 
 func (c Config) withDefaults() Config {
@@ -93,6 +100,9 @@ func (c Config) withDefaults() Config {
 	if c.MaxBackoff <= 0 {
 		c.MaxBackoff = time.Minute
 	}
+	if c.CheckTimeout <= 0 {
+		c.CheckTimeout = 5 * time.Minute
+	}
 	return c
 }
 
@@ -108,16 +118,21 @@ type Scheduler struct {
 	Log   io.Writer                                        // progress lines (default: discard)
 	Now   func() time.Time                                 // clock (default: time.Now)
 	Sleep func(ctx context.Context, d time.Duration) error // (default: timer+ctx)
+	// RunCheck executes the planner's per-task tier-0 check command inside
+	// the session worktree (default: sh -c, capped by Cfg.CheckTimeout).
+	RunCheck func(ctx context.Context, dir, command string) (output string, err error)
 }
 
 // taskClock tracks per-task timing observed by THIS process. It resets on
 // resume (Phase 1: timeout clocks are in-memory, not derived from events).
 type taskClock struct {
-	lastStatus   aoclient.SessionStatus
-	lastChangeAt time.Time // when the observed AO status last changed
-	noSignalAt   time.Time // start of the current no_signal streak (zero = none)
-	markerBad    bool      // previous poll saw a malformed marker (grace of one poll)
-	blockedNoted bool      // merge_blocked already recorded for the current streak
+	lastStatus      aoclient.SessionStatus
+	lastChangeAt    time.Time // when the observed AO status last changed
+	noSignalAt      time.Time // start of the current no_signal streak (zero = none)
+	markerBad       bool      // previous poll saw a malformed marker (grace of one poll)
+	blockedNoted    bool      // merge_blocked already recorded for the current streak
+	verified        bool      // tier-0 verify passed (blocked-merge re-polls skip it)
+	systemCommitted bool      // system-commit step already performed
 }
 
 // runner is the per-run state of one Scheduler.Run invocation.
@@ -170,6 +185,21 @@ func markerPathFor(planID, taskID string) string {
 // (backoff, never fail) as opposed to an API-level answer.
 func isTransport(err error) bool {
 	return errors.Is(err, aoclient.ErrDaemonNotRunning)
+}
+
+// runCheck executes one tier-0 check command in dir via the injected
+// RunCheck hook or the default sh -c runner (combined output, bounded by
+// Cfg.CheckTimeout).
+func (r *runner) runCheck(ctx context.Context, dir, command string) (string, error) {
+	if r.RunCheck != nil {
+		return r.RunCheck(ctx, dir, command)
+	}
+	cctx, cancel := context.WithTimeout(ctx, r.Cfg.CheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "sh", "-c", command)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func defaultSleep(ctx context.Context, d time.Duration) error {

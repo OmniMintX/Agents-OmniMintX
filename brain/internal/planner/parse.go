@@ -8,12 +8,14 @@ import (
 )
 
 // taskJSON / planJSON mirror the fixed LLM output schema:
-// {"tasks":[{"title","prompt","harness","depends_on":[]}]}.
-// depends_on references other tasks by TITLE.
+// {"tasks":[{"title","prompt","harness","check","depends_on":[]}]}.
+// depends_on references other tasks by TITLE. check is the optional
+// deterministic tier-0 verification command run in the session worktree.
 type taskJSON struct {
 	Title     string   `json:"title"`
 	Prompt    string   `json:"prompt"`
 	Harness   string   `json:"harness"`
+	Check     string   `json:"check,omitempty"`
 	DependsOn []string `json:"depends_on"`
 }
 
@@ -51,6 +53,7 @@ func Parse(data []byte, allowedHarnesses []string) (*Plan, error) {
 			Title:     t.Title,
 			Prompt:    t.Prompt,
 			Harness:   t.Harness,
+			Check:     strings.TrimSpace(t.Check),
 			DependsOn: deps,
 		}
 	}

@@ -288,6 +288,79 @@ func TestAbortOwnMergeGuard(t *testing.T) {
 	}
 }
 
+// TestHasDiffThreeDot: a branch with a commit has a diff vs main; after a
+// sibling merges into main the check must still be three-dot (merge-base),
+// and an empty branch has no diff.
+func TestHasDiffThreeDot(t *testing.T) {
+	repo := newRepo(t)
+	addBranch(t, repo, "feat-a", "a.txt", "A\n")
+	git(t, repo, "branch", "empty-b", "main")
+	has, err := Merger{}.HasDiff(ctx, repo, "feat-a", "main")
+	if err != nil || !has {
+		t.Fatalf("HasDiff(feat-a) = %v, %v; want true", has, err)
+	}
+	has, err = Merger{}.HasDiff(ctx, repo, "empty-b", "main")
+	if err != nil || has {
+		t.Fatalf("HasDiff(empty-b) = %v, %v; want false", has, err)
+	}
+	// A sibling advancing main must not make empty-b look diffed.
+	if _, err := (Merger{}).Merge(ctx, repo, "feat-a", "main", "m"); err != nil {
+		t.Fatal(err)
+	}
+	has, err = Merger{}.HasDiff(ctx, repo, "empty-b", "main")
+	if err != nil || has {
+		t.Fatalf("HasDiff(empty-b) after sibling merge = %v, %v; want false", has, err)
+	}
+}
+
+// TestCommitWorktreeRescue: uncommitted files in a session worktree are
+// staged and committed (marker files excluded); a clean worktree is a
+// no-op; WorktreeFor finds the branch's worktree.
+func TestCommitWorktreeRescue(t *testing.T) {
+	repo := newRepo(t)
+	git(t, repo, "branch", "sess-b", "main")
+	wt := filepath.Join(t.TempDir(), "sess-b")
+	git(t, repo, "worktree", "add", wt, "sess-b")
+	t.Cleanup(func() { git(t, repo, "worktree", "remove", "--force", wt) })
+
+	// git reports symlink-resolved paths (macOS: /var -> /private/var).
+	wantWt, err := filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := Merger{}.WorktreeFor(ctx, repo, "sess-b")
+	if err != nil || found != wantWt {
+		t.Fatalf("WorktreeFor = %q, %v; want %q", found, err, wantWt)
+	}
+
+	res, err := Merger{}.CommitWorktree(ctx, wt, "om: system-commit", []string{".om-done.*"})
+	if err != nil || res.Committed {
+		t.Fatalf("clean worktree must be a no-op, got %+v, %v", res, err)
+	}
+
+	writeFile(t, wt, "forgot.txt", "work\n")
+	writeFile(t, wt, ".om-done.abcd1234", "ok: done\n")
+	res, err = Merger{}.CommitWorktree(ctx, wt, "om: system-commit", []string{".om-done.*"})
+	if err != nil || !res.Committed || res.SHA == "" {
+		t.Fatalf("CommitWorktree = %+v, %v; want a commit", res, err)
+	}
+	if len(res.Files) != 1 || res.Files[0] != "forgot.txt" {
+		t.Fatalf("committed files = %v, want [forgot.txt] (marker excluded)", res.Files)
+	}
+	if out := git(t, repo, "show", "sess-b:forgot.txt"); out != "work" {
+		t.Fatalf("sess-b:forgot.txt = %q", out)
+	}
+	// The marker survives uncommitted; the worktree is otherwise clean.
+	has, err := Merger{}.HasUncommitted(ctx, wt, []string{".om-done.*"})
+	if err != nil || has {
+		t.Fatalf("HasUncommitted after rescue = %v, %v; want false", has, err)
+	}
+	has, err = Merger{}.HasUncommitted(ctx, wt, nil)
+	if err != nil || !has {
+		t.Fatalf("marker file must still be uncommitted, got %v, %v", has, err)
+	}
+}
+
 func TestDefaultBranchAndRemoteCheck(t *testing.T) {
 	repo := newRepo(t)
 	branch, err := Merger{}.DefaultBranch(ctx, repo)

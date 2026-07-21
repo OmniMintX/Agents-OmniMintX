@@ -34,7 +34,9 @@ func taskIDs(tasks []Task) []string {
 
 func TestCreatePlanAndGetters(t *testing.T) {
 	s := openTestStore(t)
-	mustCreatePlan(t, s, "p1", nt("a"), nt("b", "a"), nt("c", "a"), nt("d", "b", "c"))
+	withCheck := nt("a")
+	withCheck.Check = "test -s a.txt"
+	mustCreatePlan(t, s, "p1", withCheck, nt("b", "a"), nt("c", "a"), nt("d", "b", "c"))
 
 	p, err := s.GetPlan("p1")
 	if err != nil {
@@ -53,6 +55,13 @@ func TestCreatePlanAndGetters(t *testing.T) {
 	for _, task := range tasks {
 		if task.Status != TaskPending || task.Harness != "claude-code" {
 			t.Fatalf("unexpected task: %+v", task)
+		}
+		want := ""
+		if task.ID == "a" {
+			want = "test -s a.txt"
+		}
+		if task.Check != want {
+			t.Fatalf("task %s check = %q, want %q", task.ID, task.Check, want)
 		}
 	}
 	events, err := s.ListEvents("p1")
@@ -118,7 +127,19 @@ func TestMigrateTasksPK(t *testing.T) {
 			t.Fatalf("prepare old schema: %v", err)
 		}
 	}
-	mustCreatePlan(t, s, "p1", nt("t1"), nt("t2", "t1"))
+	// Populate the way the old binary did (no check_cmd column yet).
+	ts := now()
+	oldStmts := []string{
+		`INSERT INTO plans (id, goal, project_id, status, created_at) VALUES ('p1', 'goal of p1', 'proj-1', 'draft', '` + ts + `')`,
+		`INSERT INTO tasks (id, plan_id, title, prompt, harness, status, created_at) VALUES ('t1', 'p1', 't1', 'p', 'claude-code', 'pending', '` + ts + `')`,
+		`INSERT INTO tasks (id, plan_id, title, prompt, harness, status, created_at) VALUES ('t2', 'p1', 't2', 'p', 'claude-code', 'pending', '` + ts + `')`,
+		`INSERT INTO task_dependencies (plan_id, task_id, depends_on_task_id) VALUES ('p1', 't2', 't1')`,
+	}
+	for _, q := range oldStmts {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("populate old schema: %v", err)
+		}
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -208,13 +229,15 @@ func TestFinishTaskPayload(t *testing.T) {
 	must(s.StartRun("p1", "run-1"))
 	must(s.DispatchTask("p1", "a", "run-1", "sess-a", "ao/sess-a/root"))
 	must(s.RecordMergeBlocked("p1", "a", "run-1", `{"branch":"ao/sess-a/root","reason":"dirty"}`))
+	must(s.RecordTaskVerdict("p1", "a", "run-1", `{"verdict":"pass","tier":0}`))
+	must(s.RecordTaskSystemCommit("p1", "a", "run-1", `{"branch":"ao/sess-a/root","sha":"def","files":["x.txt"]}`))
 	must(s.RecordTaskBranchMerged("p1", "a", "run-1", `{"branch":"ao/sess-a/root","sha":"abc"}`))
 	must(s.FinishTask("p1", "a", "run-1", "", `{"marker":"ok","summary":"did it"}`))
 	events, err := s.ListEvents("p1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var done, merged, blocked string
+	var done, merged, blocked, verdict, sysCommit string
 	for _, e := range events {
 		switch e.Type {
 		case EventTaskDone:
@@ -223,6 +246,10 @@ func TestFinishTaskPayload(t *testing.T) {
 			merged = e.PayloadJSON
 		case EventMergeBlocked:
 			blocked = e.PayloadJSON
+		case EventTaskVerdict:
+			verdict = e.PayloadJSON
+		case EventTaskSystemCommit:
+			sysCommit = e.PayloadJSON
 		}
 	}
 	if !strings.Contains(done, `"summary":"did it"`) {
@@ -230,6 +257,9 @@ func TestFinishTaskPayload(t *testing.T) {
 	}
 	if !strings.Contains(merged, `"sha":"abc"`) || !strings.Contains(blocked, `"reason":"dirty"`) {
 		t.Fatalf("audit payloads wrong: merged=%q blocked=%q", merged, blocked)
+	}
+	if !strings.Contains(verdict, `"verdict":"pass"`) || !strings.Contains(sysCommit, `"sha":"def"`) {
+		t.Fatalf("verify audit payloads wrong: verdict=%q system_commit=%q", verdict, sysCommit)
 	}
 	st := assertDeriveMatchesCache(t, s, "p1")
 	if st.TaskStatus["a"] != TaskDone {

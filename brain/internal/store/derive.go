@@ -37,8 +37,10 @@ func PlanState(events []Event, taskIDs []string) (*DerivedState, error) {
 			st.PlanStatus = PlanFailed // TERMINAL in Phase 1
 		case EventPlanCancelled:
 			st.PlanStatus = PlanCancelled
-		case EventAOUnreachable, EventTaskBranchMerged, EventMergeBlocked:
-			// Informational only: no state change (merged-ness lives in git).
+		case EventAOUnreachable, EventTaskBranchMerged, EventMergeBlocked,
+			EventTaskVerdict, EventTaskSystemCommit:
+			// Informational only: no state change (merged-ness lives in git;
+			// a tier-0 fail is followed by its own task_failed event).
 		case EventTaskDispatching, EventTaskDispatched, EventTaskStarted,
 			EventTaskNeedsHuman, EventTaskResumed, EventTaskDone, EventTaskFailed:
 			if e.TaskID == nil {

@@ -27,6 +27,14 @@ type MergeResult struct {
 	Conflict string // non-empty: real merge conflict
 }
 
+// CommitResult is the outcome of one CommitWorktree call. Committed=false
+// means the worktree was already clean (idempotent no-op).
+type CommitResult struct {
+	SHA       string   // commit created (empty when nothing to commit)
+	Files     []string // paths staged into the commit
+	Committed bool
+}
+
 // Merger shells out to the git CLI. The zero value is ready to use.
 type Merger struct{}
 
@@ -77,6 +85,76 @@ func (Merger) DefaultBranch(ctx context.Context, repo string) (string, error) {
 		return "", fmt.Errorf("%s is not a git repository: %w", repo, gerr)
 	}
 	return "main", nil
+}
+
+// WorktreeFor returns the directory where branch is checked out ("" when
+// none) — for AO sessions this is the session worktree the worker ran in.
+func (Merger) WorktreeFor(ctx context.Context, repo, branch string) (string, error) {
+	return checkoutOf(ctx, repo, branch)
+}
+
+// HasDiff reports whether branch carries committed changes vs base
+// (three-dot: diff from merge-base to branch, so sibling merges into base
+// never mask an empty branch).
+func (Merger) HasDiff(ctx context.Context, repo, branch, base string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "diff", "--quiet",
+		"refs/heads/"+base+"...refs/heads/"+branch)
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitOne(err) {
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff %s...%s: %w", base, branch, err)
+}
+
+// HasUncommitted reports whether dir has uncommitted changes (tracked or
+// untracked), ignoring the exclude pathspecs (e.g. the .om-done.* markers).
+func (Merger) HasUncommitted(ctx context.Context, dir string, exclude []string) (bool, error) {
+	out, err := run(ctx, dir, append([]string{"status", "--porcelain"}, excludePathspec(exclude)...)...)
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// CommitWorktree stages and commits everything left uncommitted in dir
+// (staging is naturally limited to that worktree: linked worktrees have
+// their own index), skipping the exclude pathspecs. A clean worktree is an
+// idempotent no-op. Used by the scheduler's system-commit step to rescue
+// work the AO worker forgot to commit before the merge.
+func (Merger) CommitWorktree(ctx context.Context, dir, msg string, exclude []string) (CommitResult, error) {
+	if _, err := run(ctx, dir, append([]string{"add", "-A"}, excludePathspec(exclude)...)...); err != nil {
+		return CommitResult{}, err
+	}
+	staged, err := run(ctx, dir, "diff", "--cached", "--name-only")
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if staged == "" {
+		return CommitResult{}, nil
+	}
+	// Explicit identity: system commits must never fail on a repo without
+	// user.name/user.email, and the author marks them as Overmind's.
+	if _, err := run(ctx, dir, "-c", "user.name=overmind", "-c", "user.email=overmind@localhost",
+		"commit", "-m", msg); err != nil {
+		return CommitResult{}, err
+	}
+	sha, err := run(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		return CommitResult{}, err
+	}
+	return CommitResult{SHA: sha, Files: strings.Split(staged, "\n"), Committed: true}, nil
+}
+
+// excludePathspec renders exclude patterns as git pathspecs rooted at ".".
+func excludePathspec(exclude []string) []string {
+	specs := []string{"--", "."}
+	for _, e := range exclude {
+		specs = append(specs, ":(exclude)"+e)
+	}
+	return specs
 }
 
 // HasRemoteBranch reports whether refs/remotes/origin/<branch> exists.

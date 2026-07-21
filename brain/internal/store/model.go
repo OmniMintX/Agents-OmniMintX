@@ -49,6 +49,10 @@ const (
 	// of truth for merged-ness, these only record what the scheduler did).
 	EventTaskBranchMerged = "task_branch_merged" // {branch, sha}
 	EventMergeBlocked     = "merge_blocked"      // {branch, reason}
+	// Verify-pipeline audit events (OM-9, informational; the state change
+	// on a tier-0 fail is the task_failed event that follows).
+	EventTaskVerdict      = "task_verdict"       // {verdict: pass|fail, tier, reason?}
+	EventTaskSystemCommit = "task_system_commit" // {branch, sha, files}
 )
 
 // Plan is a stored plan row.
@@ -70,6 +74,7 @@ type Task struct {
 	Title       string
 	Prompt      string
 	Harness     string
+	Check       string // tier-0 verify command from the planner (may be empty)
 	Status      string
 	AOSessionID *string
 	Branch      *string // AO-assigned branch, e.g. ao/<sessionID>/root
@@ -84,6 +89,7 @@ type NewTask struct {
 	Title     string
 	Prompt    string
 	Harness   string
+	Check     string // tier-0 verify command (may be empty)
 	DependsOn []string
 }
 

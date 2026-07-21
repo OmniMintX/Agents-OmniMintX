@@ -110,6 +110,25 @@ func TestParsePromptTooLong(t *testing.T) {
 	}
 }
 
+// TestParseCheckField: the per-task tier-0 check command is optional,
+// trimmed, and carried through to the parsed task.
+func TestParseCheckField(t *testing.T) {
+	fx := planFixture(t,
+		taskJSON{Title: "a", Prompt: okPrompt("A."), Harness: "codex", Check: "  test -s a.txt  "},
+		taskJSON{Title: "b", Prompt: okPrompt("B."), Harness: "codex"},
+	)
+	plan, err := Parse([]byte(fx), testHarnesses)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if plan.Tasks[0].Check != "test -s a.txt" {
+		t.Fatalf("check = %q, want trimmed command", plan.Tasks[0].Check)
+	}
+	if plan.Tasks[1].Check != "" {
+		t.Fatalf("missing check must stay empty, got %q", plan.Tasks[1].Check)
+	}
+}
+
 // TestParseNoMarkerRequired: the completion-marker protocol is injected by
 // the scheduler at dispatch, so a prompt without any marker mention is valid.
 func TestParseNoMarkerRequired(t *testing.T) {

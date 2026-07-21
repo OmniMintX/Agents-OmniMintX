@@ -21,8 +21,8 @@ func (s *Store) CreatePlan(planID, goal, projectID string, tasks []NewTask) erro
 		}
 		for _, t := range tasks {
 			if _, err := tx.Exec(
-				`INSERT INTO tasks (id, plan_id, title, prompt, harness, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				t.ID, planID, t.Title, t.Prompt, t.Harness, TaskPending, ts,
+				`INSERT INTO tasks (id, plan_id, title, prompt, harness, check_cmd, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				t.ID, planID, t.Title, t.Prompt, t.Harness, t.Check, TaskPending, ts,
 			); err != nil {
 				return fmt.Errorf("insert task %s: %w", t.ID, err)
 			}
@@ -105,7 +105,7 @@ func (s *Store) ListPlans() ([]Plan, error) {
 // GetTasks returns all tasks of a plan (with dependency IDs), ordered by id.
 func (s *Store) GetTasks(planID string) ([]Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, plan_id, title, prompt, harness, status, ao_session_id, branch, pr_url, created_at
+		`SELECT id, plan_id, title, prompt, harness, check_cmd, status, ao_session_id, branch, pr_url, created_at
 		 FROM tasks WHERE plan_id = ? ORDER BY id`, planID)
 	if err != nil {
 		return nil, err
@@ -115,7 +115,7 @@ func (s *Store) GetTasks(planID string) ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var sess, branch, pr, created sql.NullString
-		if err := rows.Scan(&t.ID, &t.PlanID, &t.Title, &t.Prompt, &t.Harness, &t.Status, &sess, &branch, &pr, &created); err != nil {
+		if err := rows.Scan(&t.ID, &t.PlanID, &t.Title, &t.Prompt, &t.Harness, &t.Check, &t.Status, &sess, &branch, &pr, &created); err != nil {
 			return nil, err
 		}
 		t.AOSessionID, t.Branch, t.PRURL = nullStr(sess), nullStr(branch), nullStr(pr)

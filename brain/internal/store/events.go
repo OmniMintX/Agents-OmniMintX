@@ -179,6 +179,24 @@ func (s *Store) RecordMergeBlocked(planID, taskID, runID, payloadJSON string) er
 	})
 }
 
+// RecordTaskVerdict appends the informational task_verdict audit event
+// ({verdict: pass|fail, tier, reason?}); a fail verdict is followed by its
+// own task_failed state change.
+func (s *Store) RecordTaskVerdict(planID, taskID, runID, payloadJSON string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		return appendEvent(tx, planID, taskID, runID, EventTaskVerdict, payloadJSON)
+	})
+}
+
+// RecordTaskSystemCommit appends the informational task_system_commit
+// audit event: the scheduler committed changes the worker left uncommitted
+// in its session worktree before merging ({branch, sha, files}).
+func (s *Store) RecordTaskSystemCommit(planID, taskID, runID, payloadJSON string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		return appendEvent(tx, planID, taskID, runID, EventTaskSystemCommit, payloadJSON)
+	})
+}
+
 // ListEvents returns all events of a plan in append order (for `om events`).
 func (s *Store) ListEvents(planID string) ([]Event, error) {
 	rows, err := s.db.Query(

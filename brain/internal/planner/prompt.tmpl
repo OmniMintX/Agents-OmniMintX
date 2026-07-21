@@ -20,6 +20,7 @@ no commentary, no extra fields:
       "title": "short unique task title",
       "prompt": "full self-contained instructions for the agent",
       "harness": "one of the available harness IDs",
+      "check": "one shell command verifying the task's definition of done",
       "depends_on": ["title of the prerequisite task, if any"]
     }
   ]
@@ -41,3 +42,8 @@ HARD RULES:
    and contains Y"). Do NOT add any completion-signal or marker-file
    instructions — the scheduler appends its own completion protocol.
 5. Use only harness IDs from the AVAILABLE HARNESSES list above.
+6. "check" is ONE non-interactive shell command run from the repository
+   root after the agent finishes; exit code 0 means the task's definition
+   of done holds (e.g. "test -s reply.txt", "go build ./...", "npm test").
+   Keep it fast and deterministic. Use "" only when no meaningful command
+   exists.

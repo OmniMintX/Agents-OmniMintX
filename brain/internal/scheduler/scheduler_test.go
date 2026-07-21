@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -401,6 +402,172 @@ func TestRunPrecheckOriginRefusal(t *testing.T) {
 	}
 	if got := planStatus(t, st); got != store.PlanApproved {
 		t.Fatalf("plan status after refusal = %s, want approved (untouched)", got)
+	}
+}
+
+// TestRunVerifyEmptyDiffFails: tier 0 must fail a task whose branch has no
+// diff vs the base AND no uncommitted work — with task_verdict(fail,
+// tier=0), kind=verify_failed, and NO merge.
+func TestRunVerifyEmptyDiffFails(t *testing.T) {
+	st, ao, git, s := newHarnessGit(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	git.emptyDiff["ao/sess-1"] = true
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskFailed {
+		t.Fatalf("task = %s, want failed", got)
+	}
+	if len(git.merged) != 0 {
+		t.Fatalf("empty-diff branch must not be merged: %v", git.merged)
+	}
+	events, _ := st.ListEvents("plan-1")
+	verdict, failed := "", ""
+	for _, e := range events {
+		switch e.Type {
+		case store.EventTaskVerdict:
+			verdict = e.PayloadJSON
+		case store.EventTaskFailed:
+			failed = e.PayloadJSON
+		}
+	}
+	if !strings.Contains(verdict, `"verdict":"fail"`) || !strings.Contains(verdict, `"tier":0`) {
+		t.Fatalf("want task_verdict fail tier 0, got %q", verdict)
+	}
+	if !strings.Contains(failed, `"kind":"verify_failed"`) || !strings.Contains(failed, "empty diff") {
+		t.Fatalf("want task_failed kind=verify_failed with empty-diff reason, got %q", failed)
+	}
+}
+
+// TestRunSystemCommitRescuesUncommitted: work the agent forgot to commit
+// must pass tier 0 (uncommitted counts as work), be system-committed
+// BEFORE the merge, and be audited as task_system_commit.
+func TestRunSystemCommitRescuesUncommitted(t *testing.T) {
+	st, ao, git, s := newHarnessGit(t, []store.NewTask{nt("a1234567")}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	git.emptyDiff["ao/sess-1"] = true
+	git.uncommitted["ao/sess-1"] = true
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskDone {
+		t.Fatalf("task = %s, want done", got)
+	}
+	var order []string
+	for _, e := range ao.events() {
+		if strings.HasPrefix(e, "syscommit:") || strings.HasPrefix(e, "merge:") {
+			order = append(order, e)
+		}
+	}
+	want := []string{"syscommit:ao/sess-1", "merge:ao/sess-1"}
+	if len(order) != 2 || order[0] != want[0] || order[1] != want[1] {
+		t.Fatalf("system-commit must precede merge, got %v", order)
+	}
+	events, _ := st.ListEvents("plan-1")
+	var sysCommit, verdict string
+	for _, e := range events {
+		switch e.Type {
+		case store.EventTaskSystemCommit:
+			sysCommit = e.PayloadJSON
+		case store.EventTaskVerdict:
+			verdict = e.PayloadJSON
+		}
+	}
+	if !strings.Contains(sysCommit, `"branch":"ao/sess-1"`) || !strings.Contains(sysCommit, `"sha":`) {
+		t.Fatalf("want task_system_commit {branch, sha, files}, got %q", sysCommit)
+	}
+	if !strings.Contains(verdict, `"verdict":"pass"`) {
+		t.Fatalf("want task_verdict pass, got %q", verdict)
+	}
+}
+
+// TestRunCheckCommandPasses: the planner's per-task check command must run
+// in the session worktree; exit 0 lets the pipeline continue to done.
+func TestRunCheckCommandPasses(t *testing.T) {
+	task := nt("a1234567")
+	task.Check = "test -s reply.txt"
+	st, ao, _, s := newHarnessGit(t, []store.NewTask{task}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	var gotDir, gotCmd string
+	s.RunCheck = func(_ context.Context, dir, command string) (string, error) {
+		gotDir, gotCmd = dir, command
+		return "ok output", nil
+	}
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskDone {
+		t.Fatalf("task = %s, want done", got)
+	}
+	if gotCmd != "test -s reply.txt" || gotDir != fakeWorktreeRoot+"ao/sess-1" {
+		t.Fatalf("check ran with dir=%q cmd=%q; want worktree dir + planner command", gotDir, gotCmd)
+	}
+}
+
+// TestRunCheckCommandFails: a failing check command must fail the task at
+// tier 0 with the check output in the payload and no merge.
+func TestRunCheckCommandFails(t *testing.T) {
+	task := nt("a1234567")
+	task.Check = "go test ./..."
+	st, ao, git, s := newHarnessGit(t, []store.NewTask{task}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	s.RunCheck = func(_ context.Context, _, _ string) (string, error) {
+		return "FAIL: TestX broke", fmt.Errorf("exit status 1")
+	}
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskFailed {
+		t.Fatalf("task = %s, want failed", got)
+	}
+	if len(git.merged) != 0 {
+		t.Fatalf("check-failed branch must not be merged: %v", git.merged)
+	}
+	events, _ := st.ListEvents("plan-1")
+	found := false
+	for _, e := range events {
+		if e.Type == store.EventTaskFailed &&
+			strings.Contains(e.PayloadJSON, `"kind":"verify_failed"`) &&
+			strings.Contains(e.PayloadJSON, "TestX broke") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("task_failed payload must carry kind=verify_failed and the check output")
+	}
+}
+
+// TestRunVerifyOnceAcrossBlockedMerges: a transiently blocked merge must
+// NOT re-run tier-0 verify or the system-commit on every retry poll.
+func TestRunVerifyOnceAcrossBlockedMerges(t *testing.T) {
+	task := nt("a1234567")
+	task.Check = "true"
+	st, ao, git, s := newHarnessGit(t, []store.NewTask{task}, Config{})
+	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
+	git.blocked = 3
+	checkRuns := 0
+	s.RunCheck = func(_ context.Context, _, _ string) (string, error) {
+		checkRuns++
+		return "", nil
+	}
+	if err := s.Run(context.Background(), "plan-1"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := taskStatuses(t, st)["a1234567"]; got != store.TaskDone {
+		t.Fatalf("task = %s, want done", got)
+	}
+	if checkRuns != 1 {
+		t.Fatalf("check command ran %d times, want 1 (verify must not repeat per blocked poll)", checkRuns)
+	}
+	events, _ := st.ListEvents("plan-1")
+	verdicts := 0
+	for _, e := range events {
+		if e.Type == store.EventTaskVerdict {
+			verdicts++
+		}
+	}
+	if verdicts != 1 {
+		t.Fatalf("task_verdict events = %d, want 1", verdicts)
 	}
 }
 

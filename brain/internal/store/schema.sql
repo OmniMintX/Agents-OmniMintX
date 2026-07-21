@@ -22,12 +22,15 @@ CREATE TABLE IF NOT EXISTS plans (
 -- Task ids are PLAN-SCOPED (the planner reuses t1..tN in every plan), so the
 -- primary key must be composite. Databases created when `id` alone was the
 -- PK are rebuilt by migrateTasksPK (store.go).
+-- check_cmd is the planner-generated tier-0 verification command (may be
+-- empty). Older databases get the column via migrateTasksCheck (store.go).
 CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT NOT NULL,
     plan_id       TEXT NOT NULL REFERENCES plans(id),
     title         TEXT NOT NULL,
     prompt        TEXT NOT NULL,
     harness       TEXT NOT NULL,
+    check_cmd     TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','ready','dispatching','dispatched','running','needs_human','done','failed')),
     ao_session_id TEXT,

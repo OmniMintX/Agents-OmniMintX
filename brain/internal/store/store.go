@@ -51,7 +51,32 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateTasksCheck(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// migrateTasksCheck adds the check_cmd column (tier-0 verify command,
+// OM-9) to tasks tables created before the column existed. Runs after
+// migrateTasksPK: the PK rebuild recreates tasks without check_cmd.
+func migrateTasksCheck(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&ddl)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("migrate tasks check_cmd: read tasks ddl: %w", err)
+	}
+	if strings.Contains(ddl, "check_cmd") {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN check_cmd TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate tasks check_cmd: %w", err)
+	}
+	return nil
 }
 
 // migrateTasksPK rebuilds the tasks and task_dependencies tables for

@@ -68,7 +68,7 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	}
 	tasks := make([]store.NewTask, len(plan.Tasks))
 	for i, t := range plan.Tasks {
-		tasks[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, DependsOn: t.DependsOn}
+		tasks[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, Check: t.Check, DependsOn: t.DependsOn}
 	}
 	if err := st.CreatePlan(planID, goal, projectID, tasks); err != nil {
 		return err

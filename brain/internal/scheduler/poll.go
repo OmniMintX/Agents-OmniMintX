@@ -106,10 +106,34 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 	switch verdict {
 	case markerOK:
 		ck.markerBad = false
-		proceed, err := r.mergeTaskBranch(ctx, t, sess)
+		// Pipeline (OM-9): ok marker -> tier-0 verify -> system-commit ->
+		// local merge. Verify/commit run once per task (flags on the task
+		// clock); a blocked merge re-polls only the merge step.
+		branch := sess.Branch
+		if branch == "" && t.Branch != nil {
+			branch = *t.Branch
+		}
+		if branch == "" {
+			return r.failTaskKind(t, "merge_failed", "session has no branch to merge", sess.ID, nil)
+		}
+		if !ck.verified {
+			proceed, err := r.verifyTier0(ctx, t, sess, branch)
+			if err != nil || !proceed {
+				return err
+			}
+			ck.verified = true
+		}
+		if !ck.systemCommitted {
+			proceed, err := r.systemCommit(ctx, t, sess, branch)
+			if err != nil || !proceed {
+				return err
+			}
+			ck.systemCommitted = true
+		}
+		proceed, err := r.mergeTaskBranch(ctx, t, sess, branch)
 		if err != nil || !proceed {
 			// err: transport/store; !proceed: blocked (retry next tick) or
-			// the merge already failed the task (conflict / no branch).
+			// the merge already failed the task (conflict).
 			return err
 		}
 		return r.finishTask(ctx, t, sess, detail)
@@ -141,21 +165,102 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 	}
 }
 
+// verifyTier0 runs the deterministic tier-0 checks after an ok: marker:
+// the branch diff vs the base must be non-empty (uncommitted work in the
+// session worktree counts — the system-commit step rescues it), and the
+// planner's per-task check command (if any) must pass inside the worktree.
+// The verdict is recorded as a task_verdict event; a fail also fails the
+// task (kind=verify_failed) right here. proceed=false with nil error means
+// the task was failed.
+func (r *runner) verifyTier0(ctx context.Context, t store.Task, sess aoclient.Session, branch string) (proceed bool, err error) {
+	wt, err := r.Git.WorktreeFor(ctx, r.repo, branch)
+	if err != nil {
+		return r.failTier0(ctx, t, sess, fmt.Sprintf("locate session worktree of %s: %v", branch, err), nil)
+	}
+	hasDiff, err := r.Git.HasDiff(ctx, r.repo, branch, r.defaultBranch)
+	if err != nil {
+		return r.failTier0(ctx, t, sess, fmt.Sprintf("diff %s vs %s: %v", branch, r.defaultBranch, err), nil)
+	}
+	if !hasDiff {
+		uncommitted := false
+		if wt != "" {
+			if uncommitted, err = r.Git.HasUncommitted(ctx, wt, []string{DoneMarkerPrefix + "*"}); err != nil {
+				return r.failTier0(ctx, t, sess, fmt.Sprintf("check uncommitted work in %s: %v", wt, err), nil)
+			}
+		}
+		if !uncommitted {
+			return r.failTier0(ctx, t, sess,
+				fmt.Sprintf("empty diff: branch %s has no changes vs %s and no uncommitted work", branch, r.defaultBranch), nil)
+		}
+	}
+	if t.Check != "" {
+		if wt == "" {
+			return r.failTier0(ctx, t, sess,
+				fmt.Sprintf("check command cannot run: no worktree has %s checked out", branch), nil)
+		}
+		out, err := r.runCheck(ctx, wt, t.Check)
+		if err != nil {
+			return r.failTier0(ctx, t, sess,
+				fmt.Sprintf("check command failed: %s: %v", t.Check, err),
+				map[string]any{"check_output": truncate(out, maxMarkerPayload)})
+		}
+	}
+	payload := jsonPayload(map[string]any{"verdict": "pass", "tier": 0})
+	if err := r.St.RecordTaskVerdict(r.plan.ID, t.ID, r.runID, payload); err != nil {
+		return false, err
+	}
+	r.logf("task %s: tier-0 verify passed", t.ID)
+	return true, nil
+}
+
+// failTier0 records task_verdict(fail, tier=0) then fails the task with
+// kind=verify_failed (Phase: retry-with-feedback is OM-10; fail straight).
+func (r *runner) failTier0(ctx context.Context, t store.Task, sess aoclient.Session, reason string, extra map[string]any) (bool, error) {
+	payload := jsonPayload(map[string]any{"verdict": "fail", "tier": 0, "reason": reason})
+	if err := r.St.RecordTaskVerdict(r.plan.ID, t.ID, r.runID, payload); err != nil {
+		return false, err
+	}
+	return false, r.killAndFailKind(ctx, t, sess, "verify_failed", reason, extra)
+}
+
+// systemCommit stages and commits whatever the worker left uncommitted in
+// its session worktree (marker files excluded) so the merge source is a
+// complete commit; a clean worktree (or a gone worktree) is a no-op. A
+// commit is audited as task_system_commit {branch, sha, files}.
+// proceed=false with nil error means the task was failed here.
+func (r *runner) systemCommit(ctx context.Context, t store.Task, sess aoclient.Session, branch string) (proceed bool, err error) {
+	wt, err := r.Git.WorktreeFor(ctx, r.repo, branch)
+	if err != nil {
+		return false, r.failTaskKind(t, "system_commit_failed",
+			fmt.Sprintf("locate session worktree of %s: %v", branch, err), sess.ID, nil)
+	}
+	if wt == "" {
+		return true, nil // worktree gone: nothing to rescue
+	}
+	msg := fmt.Sprintf("om: system-commit task %s (%s): work left uncommitted by worker", t.ID, t.Title)
+	res, err := r.Git.CommitWorktree(ctx, wt, msg, []string{DoneMarkerPrefix + "*"})
+	if err != nil {
+		return false, r.failTaskKind(t, "system_commit_failed",
+			fmt.Sprintf("system-commit in %s: %v", wt, err), sess.ID, nil)
+	}
+	if res.Committed {
+		payload := jsonPayload(map[string]any{"branch": branch, "sha": res.SHA, "files": res.Files})
+		if err := r.St.RecordTaskSystemCommit(r.plan.ID, t.ID, r.runID, payload); err != nil {
+			return false, err
+		}
+		r.logf("task %s: system-commit %s (%d uncommitted files rescued)", t.ID, res.SHA, len(res.Files))
+	}
+	return true, nil
+}
+
 // mergeTaskBranch merges the finished session's branch into the repo's
 // default branch (AO workers never open PRs; Overmind merges locally).
 // proceed=true means the branch is in the default branch and the caller
 // may FinishTask. proceed=false with nil error means either the merge is
 // transiently blocked (retry next tick; the task clock is refrozen so
 // idle-timeout never kills a merge-blocked task) or the task was already
-// failed here (conflict / missing branch).
-func (r *runner) mergeTaskBranch(ctx context.Context, t store.Task, sess aoclient.Session) (proceed bool, err error) {
-	branch := sess.Branch
-	if branch == "" && t.Branch != nil {
-		branch = *t.Branch
-	}
-	if branch == "" {
-		return false, r.failTaskKind(t, "merge_failed", "session has no branch to merge", sess.ID, nil)
-	}
+// failed here (conflict).
+func (r *runner) mergeTaskBranch(ctx context.Context, t store.Task, sess aoclient.Session, branch string) (proceed bool, err error) {
 	ck := r.clocks[t.ID]
 	msg := fmt.Sprintf("om: merge task %s (%s) into %s", t.ID, branch, r.defaultBranch)
 	res, err := r.Git.Merge(ctx, r.repo, branch, r.defaultBranch, msg)
