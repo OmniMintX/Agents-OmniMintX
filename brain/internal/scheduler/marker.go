@@ -74,17 +74,32 @@ const maxSpawnPrompt = 4096
 // feedbackHeader introduces the verifier feedback block on a re-dispatch.
 const feedbackHeader = "\n\n--- VERIFIER FEEDBACK (previous attempt was rejected; fix these) ---\n"
 
+// minFeedbackBudget is the smallest byte budget worth spending on the full
+// feedback block; below it the block would be useless noise, so the prompt
+// falls back to a one-line "verification failed: <reason>" instead.
+const minFeedbackBudget = 100
+
+// feedbackFallback prefixes the minimal retry notice used when the full
+// feedback block does not fit.
+const feedbackFallback = "\n\nverification failed: "
+
 // promptWithFeedbackAndFooter builds the spawn prompt for a (re-)dispatch:
 // task prompt + optional verifier feedback + the marker protocol footer.
 // The feedback is truncated so the whole prompt stays within AO's
 // 4096-byte cap — the footer is never truncated (the marker protocol must
-// survive intact).
+// survive intact). When fewer than minFeedbackBudget bytes remain for the
+// feedback block, a minimal "verification failed: <reason>" line (reason =
+// first line of the feedback, truncated) is used so a retry is never
+// dispatched without any hint of why.
 func promptWithFeedbackAndFooter(prompt, feedback, markerPath string) string {
 	footer := fmt.Sprintf(promptFooterFmt, markerPath)
 	if feedback != "" {
 		budget := maxSpawnPrompt - len(prompt) - len(footer) - len(feedbackHeader)
-		if budget > 0 {
+		if budget >= minFeedbackBudget {
 			prompt += feedbackHeader + truncate(feedback, budget)
+		} else if fb := maxSpawnPrompt - len(prompt) - len(footer) - len(feedbackFallback); fb > 0 {
+			reason, _, _ := strings.Cut(feedback, "\n")
+			prompt += feedbackFallback + truncate(reason, fb)
 		}
 	}
 	return prompt + footer

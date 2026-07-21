@@ -12,7 +12,7 @@ import (
 
 // maxVerifyDiffBytes caps the diff sent to the tier-1 LLM verifier (the
 // gitops.DiffText truncation notice marks anything cut).
-const maxVerifyDiffBytes = 64 * 1024
+const maxVerifyDiffBytes = 100 * 1024
 
 // maxLLMErrs is how many CONSECUTIVE tier-1 LLM call failures are
 // tolerated (retried next poll) before the task fails with

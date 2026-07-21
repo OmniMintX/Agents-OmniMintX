@@ -390,3 +390,38 @@ func TestPromptWithFeedbackBudget(t *testing.T) {
 		t.Fatal("empty feedback must not alter the prompt")
 	}
 }
+
+// TestPromptWithFeedbackFallback: when fewer than minFeedbackBudget bytes
+// remain for the feedback block, the prompt must carry a minimal
+// "verification failed: <reason>" line (first feedback line, truncated)
+// instead of dropping the feedback entirely — still within the 4096-byte
+// cap, footer intact.
+func TestPromptWithFeedbackFallback(t *testing.T) {
+	marker := markerPathFor("plan-1", "a1234567")
+	footer := fmt.Sprintf(promptFooterFmt, marker)
+	// Leave under minFeedbackBudget bytes after prompt+footer+header.
+	prompt := strings.Repeat("x", maxSpawnPrompt-len(footer)-len(feedbackHeader)-minFeedbackBudget+1)
+	feedback := "greeting file missing\n- hello.txt: not created -> create it"
+	p := promptWithFeedbackAndFooter(prompt, feedback, marker)
+	if len(p) > maxSpawnPrompt {
+		t.Fatalf("prompt = %d bytes, exceeds %d", len(p), maxSpawnPrompt)
+	}
+	if !strings.HasSuffix(p, footer) {
+		t.Fatal("footer must be intact at the end of the prompt")
+	}
+	if strings.Contains(p, "VERIFIER FEEDBACK") {
+		t.Fatal("full feedback block must not be used under minFeedbackBudget")
+	}
+	if !strings.Contains(p, "verification failed: greeting file") {
+		t.Fatalf("fallback reason line missing:\n%s", p[len(prompt):])
+	}
+	if strings.Contains(p, "hello.txt") {
+		t.Fatal("fallback must carry only the first feedback line (the reason)")
+	}
+	// No room even for the fallback: feedback is dropped, cap still holds.
+	huge := strings.Repeat("x", maxSpawnPrompt-len(footer))
+	p = promptWithFeedbackAndFooter(huge, feedback, marker)
+	if p != huge+footer {
+		t.Fatal("with zero budget the prompt must be prompt+footer only")
+	}
+}

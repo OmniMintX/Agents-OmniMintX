@@ -178,9 +178,10 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 // the branch diff vs the base must be non-empty (uncommitted work in the
 // session worktree counts — the system-commit step rescues it), and the
 // planner's per-task check command (if any) must pass inside the worktree.
-// The verdict is recorded as a task_verdict event; a fail also fails the
-// task (kind=verify_failed) right here. proceed=false with nil error means
-// the task was failed.
+// The verdict is recorded as a task_verdict event; a fail routes through
+// retryOrFail (retry with feedback while the budget allows, otherwise the
+// task fails with kind=verify_budget_exhausted). proceed=false with nil
+// error means the task was retried or failed.
 func (r *runner) verifyTier0(ctx context.Context, t store.Task, sess aoclient.Session, branch string) (proceed bool, err error) {
 	wt, err := r.Git.WorktreeFor(ctx, r.repo, branch)
 	if err != nil {
