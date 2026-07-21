@@ -56,3 +56,7 @@ task_timeout_min: 45
 # No-signal timeout before flagging a stalled task (minutes).
 # env: OVERMIND_NO_SIGNAL_TIMEOUT_MIN
 no_signal_timeout_min: 10
+
+# Max verify-retry rounds per task (0 = fail immediately on verify fail).
+# env: OVERMIND_MAX_VERIFY_ROUNDS
+max_verify_rounds: 2
