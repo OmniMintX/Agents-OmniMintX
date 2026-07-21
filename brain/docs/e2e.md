@@ -447,3 +447,126 @@ Máy Mac mini, AO 0.10.3, claude CLI 2.1.205, om build từ HEAD 48f4a5f.
 - Cả 2 `om run` tự thoát khi plan done; không còn process om run hay tmux
   session; 4 session AO của repo lần 5 đều terminated. GIỮ nguyên hiện trường:
   repo /tmp/om-e2e5-1784644173, ~/.overmind/overmind.db, ~/.overmind/config.yaml.
+
+
+---
+
+## Nhật ký chạy thật — lần 6, 2026-07-21: autonomy modes (OM-11)
+
+**Verdict: cơ chế OM-11 PASS, mục tiêu zero-touch KHÔNG đạt.** ensureAutonomy
+hoạt động đúng cả 3 đường (unset→auto, idempotent, override CLI auto→accept-edits);
+trust-folder dialog BIẾN MẤT (không cần `.claude/settings.json` nữa); daemon
+crash giữa run + resume adopt PASS. Nhưng cả 2 nấc autonomy đều còn cần bấm
+tay: `auto` bị classifier chặn cả `git add`/`git config`, `accept-edits` hỏi
+mọi bash compound. Bonus: lần đầu quan sát sống nhánh `verify_budget_exhausted`
+của OM-10 — do 1 bug mới phát hiện (planner check vs marker protocol, bên dưới).
+Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
+
+### Setup — khác biệt then chốt so với lần 3–5
+- Repo test `/tmp/om-e2e6-1784648067`: commit đầu CHỈ có README —
+  **KHÔNG có `.claude/settings.json`** (autonomy giờ đi qua AO project config).
+- Đăng ký project qua `POST /api/v1/projects` body `{"projectId":…,"path":…,
+  "name":…}` (`--data @file`, đúng caveat lần 4/5) → 201.
+- `~/.overmind/config.yaml` giữ nguyên từ lần 5, KHÔNG có key `autonomy` →
+  default code `auto` có hiệu lực.
+
+### ensureAutonomy — PASS cả 3 đường (log nguyên văn)
+1. Run 1 plan p-e817ba09: `autonomy: project om-e2e6-1784648067 permissions
+   (unset) → auto` — GET config (chưa có permissions) → PUT với
+   `agentConfig.permissions=auto`.
+2. Hai lần resume sau đó (daemon crash, xem dưới): `autonomy: đã ở auto` —
+   idempotent, không PUT thừa.
+3. Run 2 plan p-72724723 với `om run --autonomy=accept-edits`:
+   `autonomy: project om-e2e6-1784648067 permissions auto → accept-edits` —
+   override CLI thắng config.
+4. Round-trip lossless xác nhận bằng GET cuối: config còn nguyên
+   `{"agentConfig":{"permissions":"accept-edits"},"worker":{"agentConfig":{}},
+   "orchestrator":{"agentConfig":{}},"trackerIntake":{}}` — các field khác
+   không bị PUT (replace semantics) xóa mất.
+- **Trust-folder dialog KHÔNG xuất hiện ở bất kỳ session nào (1–5)** — đúng
+  mục tiêu OM-11 "xóa trust-dialog + allowlist tĩnh". Mọi needs_human còn lại
+  đều là permission prompt per-command.
+
+### Daemon crash + resume (tình cờ, thành kịch bản thật): PASS
+- Giữa run 1, AO daemon chết → event `ao_unreachable {"error":"aoclient: AO
+  daemon is not reachable; check it is running (the run file ~/.ao/running.json
+  records the live port)…"}`, `om run` thoát lỗi rõ ràng, không hỏng state.
+- `open -a "Agent Orchestrator"` → daemon UP lại (~vài giây) → chạy lại
+  `om run p-e817ba09`: adopt session `om-e2e6-1784648067-1` theo displayName
+  (events: 3 `run_started` nhưng mỗi task chỉ 1 `task_dispatched`), resume
+  needs_input → tier-0 pass → merge. Tái lập OM-9 crash-resume lần 3/5.
+
+### Plan 1 — nấc `auto` (p-e817ba09, A→B chaining): plan DONE, KHÔNG zero-touch
+- Goal 2 task chained như lần 4: t1 tạo `greeting.txt`, t2 (depends t1) đọc
+  và trích nguyên văn vào `reply.txt`.
+- **Classifier của auto mode chặn lệnh vô hại** — nguyên văn từ tmux pane t1:
+  - `Bash(printf 'hello…' > greeting.txt && cat … && git status … )` →
+    `Denied by auto mode classifier ∙ Auto mode could not evaluate this action
+    and is blocking it for safety — run with --debug for details`
+  - `git config user.name 'Overmind Agent' && git config user.email …` →
+    Denied (cùng message); `git add greeting.txt` (đơn lẻ!) → Denied.
+  - Xen kẽ nhiều lần lỗi backend classifier: `Error: fable-5 is temporarily
+    unavailable, so auto mode cannot determine the safety of Bash right now…`
+    (outage làm nhiễu — không tách được phần nào do outage, phần nào do
+    classifier "thật"; release notes claude-code cùng ngày còn nhắc bug
+    classifier HTTP 401).
+  - Tool `Write(greeting.txt)` được auto-approve (đúng spec auto mode);
+    `git status --porcelain` đơn lẻ chạy được.
+- Kết cục t1: agent dồn về 1 lệnh compound `git add && git -c … commit` → rơi
+  xuống prompt hỏi tay → **1 lần bấm Enter**. t2 tương tự → **2 lần bấm**.
+  Tổng plan 1: 2 event `task_needs_human`, **3 lần bấm tay**.
+- Pipeline sau đó chuẩn: tier-0 pass → merge → done cả 2 task, plan done.
+  Chaining verify: `git show main:greeting.txt` = `hello-om-e2e6-1784648067`;
+  `main:reply.txt` = `Thank you for your kind message
+  "hello-om-e2e6-1784648067"; it was a pleasure to receive it.` — TRÍCH đúng.
+
+### Plan 2 — nấc `accept-edits` (p-72724723, so sánh): 4 lần bấm, plan FAILED (bug riêng)
+- Cùng repo, goal tương tự (greeting2/reply2), `om run --autonomy=accept-edits`.
+- **Mọi bash compound đều hỏi tay**, lý do nguyên văn lần lượt:
+  `Contains shell syntax (;) that cannot be statically analyzed`,
+  `Parser did not consume trailing input`,
+  `This command uses shell operators that require approval for safety`,
+  `Contains shell syntax (string) that cannot be statically analyzed`.
+  Compound READ-ONLY (`git status; echo; cat | od; git log`) thì chạy không
+  hỏi; Write auto-approve. Tổng: 4 `task_needs_human`, **4 lần bấm** trong
+  3 round của t1.
+- Plan fail KHÔNG phải do autonomy mà do bug mới (dưới): 3 round đều chết cùng
+  một check tier-0 → `task_failed {"kind":"verify_budget_exhausted",
+  "check_output":"greeting2.txt\n"}` → plan_failed. **Đây là lần đầu nhánh
+  budget-exhausted của OM-10 chạy sống** (lần 5 chưa thử được): budget đếm
+  đúng 2 retry, round 2 hết budget fail task, plan fail vì "no runnable tasks
+  remain" — đúng thiết kế.
+
+### BUG MỚI (báo cáo, KHÔNG vá — ngoài scope OM-11): planner check vs marker protocol
+- Planner sinh check tier-0 cho t1: `test "$(cat greeting2.txt)" = "…" && git
+  ls-files --error-unmatch greeting2.txt && test -z "$(git status --porcelain)"`.
+- Nhưng OVERMIND PROTOCOL bắt worker để marker `.om-done.<hex8>` **uncommitted**
+  ở repo root → `git status --porcelain` trong worktree KHÔNG BAO GIỜ sạch →
+  check fail deterministic 100% mọi round, bất kể autonomy.
+- Scheduler đã biết exclude marker (`HasUncommitted(…, [DoneMarkerPrefix+"*"])`
+  trong poll.go) nhưng `runCheck` chạy nguyên văn lệnh planner sinh — planner
+  không biết về marker. Plan 1 thoát nạn vì check của nó tình cờ không đòi
+  porcelain sạch → bug NON-DETERMINISTIC theo từng plan.
+- Hướng sửa (cần task riêng): dạy planner (prompt) không sinh check đòi
+  worktree sạch, HOẶC runCheck xóa/stash marker trước khi chạy check, HOẶC
+  hậu xử lý check command. Quyết định thiết kế để coordinator chọn.
+
+### So sánh 2 nấc + kết luận cho default
+| Nấc | needs_human | Bấm tay | Ghi chú |
+|---|---|---|---|
+| `auto` (p-e817ba09) | 2 | 3 | Write auto-OK; classifier chặn cả `git add` đơn lẻ; nhiễu bởi outage backend classifier |
+| `accept-edits` (p-72724723) | 4 | 4 | Write auto-OK; MỌI bash compound (`&&`, `;`, `$( )`) đều hỏi; read-only compound thì không |
+- **Zero-touch chưa đạt ở cả 2 nấc** trên môi trường này. Acceptance
+  criterion "goal A→B chạy 0 lần bấm" của OM-11 FAIL về mặt demo (cơ chế set
+  permission thì PASS).
+- Đề xuất: GIỮ default `auto` (ít prompt hơn, đỡ hơn accept-edits về bản chất
+  vì classifier còn cải thiện theo model; outage hôm nay là confounder — đáng
+  thử lại khi backend ổn). Zero-touch thật chỉ kỳ vọng ở
+  `bypass-permissions` — đã có sẵn trong OM-11 sau guard
+  `autonomy_allow_bypass` + khuyến cáo sandbox; chưa demo sống (cần opt-in).
+
+### Dọn dẹp
+- Cả 2 `om run` tự thoát khi plan xong (done/failed); không còn process om run
+  hay tmux session om-e2e6; 5 session AO đều terminated. GIỮ hiện trường:
+  repo /tmp/om-e2e6-1784648067, logs /tmp/om-e2e6-run.log /tmp/om-e2e6-run2.log,
+  ~/.overmind/overmind.db, ~/.overmind/config.yaml.
