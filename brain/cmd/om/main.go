@@ -40,7 +40,11 @@ func newRootCmd() *cobra.Command {
 }
 
 func loadConfig(cfgPath *string) (config.Config, error) {
-	return config.Load(*cfgPath)
+	cfg, err := config.Load(*cfgPath)
+	for _, w := range cfg.Warnings {
+		fmt.Fprintln(os.Stderr, "Warning:", w)
+	}
+	return cfg, err
 }
 
 func newPlanCmd(cfgPath *string) *cobra.Command {

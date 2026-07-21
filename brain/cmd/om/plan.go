@@ -78,59 +78,70 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	return nil
 }
 
-// newLLM builds the planner LLM from config. Provider anthropic|openai|cli;
-// when unset it auto-detects: cli if the CLI binary is installed, else
-// anthropic if its API key env var is set. API key VALUES are never printed.
+// newLLM builds the planner LLM from the provider assigned to roles.planner.
 func newLLM(cfg config.Config) (planner.LLM, string, error) {
-	cliCmd := cfg.LLM.CLICommand
+	return newRoleLLM(cfg, "planner")
+}
+
+// newRoleLLM resolves role → named provider and builds the LLM client.
+// Type anthropic|openai-compatible|cli; when unset it auto-detects: cli if
+// the CLI binary is installed, else anthropic if its API key env var is set.
+// A local base_url (e.g. Ollama) needs no API key. Key VALUES never printed.
+func newRoleLLM(cfg config.Config, role string) (planner.LLM, string, error) {
+	r, p, err := cfg.LLMForRole(role)
+	if err != nil {
+		return nil, "", err
+	}
+	name := r.Provider
+	cliCmd := p.Command
 	if cliCmd == "" {
 		cliCmd = "claude"
 	}
-	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
-	if provider == "" || provider == "auto" {
+	typ := strings.ToLower(strings.TrimSpace(p.Type))
+	if typ == "" || typ == "auto" {
 		switch {
 		case commandExists(cliCmd):
-			provider = "cli"
-		case os.Getenv(keyEnvName(cfg, "ANTHROPIC_API_KEY")) != "":
-			provider = "anthropic"
+			typ = "cli"
+		case os.Getenv(keyEnvName(p.APIKeyEnv, "ANTHROPIC_API_KEY")) != "":
+			typ = "anthropic"
 		default:
-			return nil, "", fmt.Errorf("no LLM provider available; either: install the %q CLI (llm.provider: cli), set the %s environment variable (llm.provider: anthropic), or configure an OpenAI-compatible endpoint (llm.provider: openai with llm.model, llm.base_url, llm.api_key_env)",
-				cliCmd, keyEnvName(cfg, "ANTHROPIC_API_KEY"))
+			return nil, "", fmt.Errorf("no LLM available for providers.%s; either: install the %q CLI (type: cli), set the %s environment variable (type: anthropic), or configure an OpenAI-compatible endpoint (type: openai-compatible with base_url, api_key_env)",
+				name, cliCmd, keyEnvName(p.APIKeyEnv, "ANTHROPIC_API_KEY"))
 		}
 	}
-	switch provider {
+	switch typ {
 	case "anthropic":
-		envName := keyEnvName(cfg, "ANTHROPIC_API_KEY")
+		envName := keyEnvName(p.APIKeyEnv, "ANTHROPIC_API_KEY")
 		key := os.Getenv(envName)
 		if key == "" {
-			return nil, "", fmt.Errorf("LLM API key missing: set the %s environment variable", envName)
+			return nil, "", fmt.Errorf("providers.%s: API key missing: set the %s environment variable", name, envName)
 		}
-		return planner.NewAnthropic(key, cfg.LLM.Model), "anthropic/" + cfg.LLM.Model, nil
-	case "openai":
-		envName := keyEnvName(cfg, "OPENAI_API_KEY")
+		return planner.NewAnthropic(key, r.Model), "anthropic/" + r.Model, nil
+	case "openai", "openai-compatible":
+		envName := keyEnvName(p.APIKeyEnv, "OPENAI_API_KEY")
 		key := os.Getenv(envName)
-		if key == "" {
-			return nil, "", fmt.Errorf("LLM API key missing: set the %s environment variable", envName)
+		if key == "" && !config.IsLocalBaseURL(p.BaseURL) {
+			return nil, "", fmt.Errorf("providers.%s: API key missing: set the %s environment variable (only local base_url endpoints like Ollama need no key)", name, envName)
 		}
-		return planner.NewOpenAI(key, cfg.LLM.Model, cfg.LLM.BaseURL), "openai/" + cfg.LLM.Model, nil
+		return planner.NewOpenAI(key, r.Model, p.BaseURL), "openai-compatible/" + r.Model, nil
 	case "cli":
 		if !commandExists(cliCmd) {
-			return nil, "", fmt.Errorf("llm.provider is cli but command %q was not found in PATH", cliCmd)
+			return nil, "", fmt.Errorf("providers.%s: type is cli but command %q was not found in PATH", name, cliCmd)
 		}
-		timeout := time.Duration(cfg.LLM.CLITimeoutSec) * time.Second
+		timeout := time.Duration(p.TimeoutSec) * time.Second
 		if timeout <= 0 {
 			timeout = 3 * time.Minute
 		}
-		return planner.NewCLI(cliCmd, cfg.LLM.CLIArgs, timeout), "cli/" + cliCmd, nil
+		return planner.NewCLI(cliCmd, p.Args, timeout), "cli/" + cliCmd, nil
 	default:
-		return nil, "", fmt.Errorf("unknown llm.provider %q (expected anthropic, openai or cli)", cfg.LLM.Provider)
+		return nil, "", fmt.Errorf("providers.%s: unknown type %q (expected openai-compatible, anthropic or cli)", name, p.Type)
 	}
 }
 
 // keyEnvName returns the configured API key env var name, or fallback.
-func keyEnvName(cfg config.Config, fallback string) string {
-	if cfg.LLM.APIKeyEnv != "" {
-		return cfg.LLM.APIKeyEnv
+func keyEnvName(configured, fallback string) string {
+	if configured != "" {
+		return configured
 	}
 	return fallback
 }

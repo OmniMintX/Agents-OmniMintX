@@ -5,49 +5,41 @@
 # AO daemon base URL (loopback).            env: OVERMIND_AO_BASE_URL
 ao_base_url: http://127.0.0.1:3001
 
-# Planner LLM settings.
-llm:
-  # Provider: anthropic | openai | cli.      env: OVERMIND_LLM_PROVIDER
-  # Empty = auto-detect: cli when cli_command is installed, else anthropic
-  # when its API key env var is set.
-  provider: ""
-  model: claude-sonnet-4-5                   # env: OVERMIND_LLM_MODEL
-  # Env var NAME holding the API key.        env: OVERMIND_LLM_API_KEY_ENV
-  # Empty = ANTHROPIC_API_KEY (anthropic) / OPENAI_API_KEY (openai).
-  api_key_env: ""
-  # openai provider only: API base URL.      env: OVERMIND_LLM_BASE_URL
-  # Empty = https://api.openai.com/v1. DeepSeek: https://api.deepseek.com
-  # Ollama: http://localhost:11434/v1
-  base_url: ""
-  # cli provider: headless coding-agent CLI. env: OVERMIND_LLM_CLI_COMMAND
-  cli_command: claude
-  # Args placed before the prompt (prompt is appended as the last arg).
-  cli_args: ["-p", "--output-format", "json"]
-  # Subprocess timeout (seconds).            env: OVERMIND_LLM_CLI_TIMEOUT_SEC
-  cli_timeout_sec: 180
+# Named LLM provider profiles (config v2). Declare as many as you like and
+# point each role at one. api_key_env is the NAME of the env var holding the
+# key, never the key itself.
+providers:
+  # Headless coding-agent CLI (reuses its stored auth — no API key needed).
+  claude-cli:
+    type: cli
+    command: claude
+    # Args placed before the prompt (prompt is appended as the last arg).
+    args: ["-p", "--output-format", "json"]
+    timeout_sec: 180
+  # OpenAI-compatible samples — uncomment what you use:
+  # openai:
+  #   type: openai-compatible
+  #   api_key_env: OPENAI_API_KEY        # base_url empty = https://api.openai.com/v1
+  # deepseek:
+  #   type: openai-compatible
+  #   base_url: https://api.deepseek.com
+  #   api_key_env: DEEPSEEK_API_KEY
+  # ollama:
+  #   type: openai-compatible
+  #   base_url: http://localhost:11434/v1
+  #   # local base_url needs no api_key_env
+  # anthropic:
+  #   type: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
 
-# Filled-in samples for the openai provider (api_key_env is the NAME of the
-# env var holding the key, never the key itself):
-#
-# OpenAI:
-#   llm:
-#     provider: openai
-#     model: gpt-4o
-#     api_key_env: OPENAI_API_KEY
-#
-# DeepSeek:
-#   llm:
-#     provider: openai
-#     model: deepseek-chat
-#     base_url: https://api.deepseek.com
-#     api_key_env: DEEPSEEK_API_KEY
-#
-# Ollama (local):
-#   llm:
-#     provider: openai
-#     model: llama3.1
-#     base_url: http://localhost:11434/v1
-#     api_key_env: OLLAMA_API_KEY
+# Role → provider/model assignment. Each role can use a different provider.
+roles:
+  planner: { provider: claude-cli, model: "" }
+  # verifier: { provider: deepseek, model: deepseek-chat }
+
+# Legacy v1 single `llm` block is still accepted: it is auto-mapped to
+# providers.default + roles.planner with a warning asking you to migrate.
+# The old OVERMIND_LLM_* env vars keep working through that same path.
 
 # SQLite database path.                      env: OVERMIND_DB_PATH
 db_path: ~/.overmind/overmind.db

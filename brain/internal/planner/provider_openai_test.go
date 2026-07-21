@@ -107,9 +107,26 @@ func TestOpenAIEmptyChoices(t *testing.T) {
 	}
 }
 
-func TestOpenAIRequiresKey(t *testing.T) {
-	o := NewOpenAI("", "m", "")
-	if _, err := o.Complete(context.Background(), "p"); err == nil {
-		t.Fatal("want error for empty API key")
+// Keyless local endpoints (Ollama) must work: no Authorization header sent.
+func TestOpenAIEmptyKeySkipsAuthHeader(t *testing.T) {
+	var gotAuth string
+	var hasAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, hasAuth = r.Header["Authorization"]
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openaiResponse("ok"))
+	}))
+	defer srv.Close()
+	o := NewOpenAI("", "llama3.1", srv.URL)
+	out, err := o.Complete(context.Background(), "p")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("got %q", out)
+	}
+	if hasAuth {
+		t.Fatalf("empty key must not send Authorization header, got %q", gotAuth)
 	}
 }

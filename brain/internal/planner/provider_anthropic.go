@@ -21,7 +21,7 @@ const (
 
 // Anthropic implements LLM against the Anthropic Messages API.
 type Anthropic struct {
-	APIKey  string // from env (config.LLM.APIKeyEnv, default ANTHROPIC_API_KEY)
+	APIKey  string // from env (provider api_key_env, default ANTHROPIC_API_KEY)
 	Model   string // from config (default claude-sonnet-4-5)
 	BaseURL string // override for tests; anthropicBaseURL when empty
 	HTTPC   *http.Client

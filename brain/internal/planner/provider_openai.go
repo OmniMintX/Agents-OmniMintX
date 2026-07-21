@@ -18,7 +18,7 @@ const openaiDefaultBaseURL = "https://api.openai.com/v1"
 
 // OpenAI implements LLM against any OpenAI-compatible chat completions API.
 type OpenAI struct {
-	APIKey  string // from env (config.LLM.APIKeyEnv, default OPENAI_API_KEY)
+	APIKey  string // from env (provider api_key_env); empty = no auth header (local endpoints like Ollama)
 	Model   string // from config
 	BaseURL string // from config; openaiDefaultBaseURL when empty
 	HTTPC   *http.Client
@@ -36,10 +36,8 @@ func NewOpenAI(apiKey, model, baseURL string) *OpenAI {
 }
 
 // Complete sends one user message and returns choices[0].message.content.
+// An empty APIKey skips the Authorization header (keyless local endpoints).
 func (o *OpenAI) Complete(ctx context.Context, prompt string) (string, error) {
-	if o.APIKey == "" {
-		return "", fmt.Errorf("openai: API key is empty")
-	}
 	body, err := json.Marshal(map[string]any{
 		"model": o.Model,
 		"messages": []map[string]string{
@@ -59,7 +57,9 @@ func (o *OpenAI) Complete(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("openai: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+o.APIKey)
+	if o.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.APIKey)
+	}
 
 	httpc := o.HTTPC
 	if httpc == nil {
