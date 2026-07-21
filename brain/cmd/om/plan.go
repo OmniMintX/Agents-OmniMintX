@@ -66,16 +66,21 @@ func runPlan(cfg config.Config, goal, project string, edit bool) error {
 	if err != nil {
 		return err
 	}
-	tasks := make([]store.NewTask, len(plan.Tasks))
-	for i, t := range plan.Tasks {
-		tasks[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, Check: t.Check, DependsOn: t.DependsOn}
-	}
-	if err := st.CreatePlan(planID, goal, projectID, tasks); err != nil {
+	if err := st.CreatePlan(planID, goal, projectID, storeTasks(plan.Tasks)); err != nil {
 		return err
 	}
 	printPlanTable(planID, goal, plan.Tasks)
 	fmt.Printf("\nPlan %s saved as draft. Approve with: om approve %s\n", planID, planID)
 	return nil
+}
+
+// storeTasks maps validated planner tasks to store rows.
+func storeTasks(tasks []planner.Task) []store.NewTask {
+	out := make([]store.NewTask, len(tasks))
+	for i, t := range tasks {
+		out[i] = store.NewTask{ID: t.ID, Title: t.Title, Prompt: t.Prompt, Harness: t.Harness, Check: t.Check, Verify: t.Verify, DependsOn: t.DependsOn}
+	}
+	return out
 }
 
 // newLLM builds the planner LLM from the provider assigned to roles.planner.

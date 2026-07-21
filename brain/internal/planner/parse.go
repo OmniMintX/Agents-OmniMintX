@@ -8,14 +8,17 @@ import (
 )
 
 // taskJSON / planJSON mirror the fixed LLM output schema:
-// {"tasks":[{"title","prompt","harness","check","depends_on":[]}]}.
+// {"tasks":[{"title","prompt","harness","check","verify","depends_on":[]}]}.
 // depends_on references other tasks by TITLE. check is the optional
 // deterministic tier-0 verification command run in the session worktree.
+// verify is the optional verify strategy (none|deterministic|llm); empty
+// defaults to deterministic.
 type taskJSON struct {
 	Title     string   `json:"title"`
 	Prompt    string   `json:"prompt"`
 	Harness   string   `json:"harness"`
 	Check     string   `json:"check,omitempty"`
+	Verify    string   `json:"verify,omitempty"`
 	DependsOn []string `json:"depends_on"`
 }
 
@@ -48,12 +51,17 @@ func Parse(data []byte, allowedHarnesses []string) (*Plan, error) {
 		for _, d := range t.DependsOn {
 			deps = append(deps, idByTitle[d])
 		}
+		verify := strings.TrimSpace(t.Verify)
+		if verify == "" {
+			verify = "deterministic"
+		}
 		plan.Tasks[i] = Task{
 			ID:        idByTitle[t.Title],
 			Title:     t.Title,
 			Prompt:    t.Prompt,
 			Harness:   t.Harness,
 			Check:     strings.TrimSpace(t.Check),
+			Verify:    verify,
 			DependsOn: deps,
 		}
 	}
@@ -95,6 +103,12 @@ func validate(pj planJSON, allowedHarnesses []string) error {
 		if len(t.Prompt) > MaxPromptChars {
 			return fmt.Errorf("task %q: prompt is %d chars, exceeding the %d limit",
 				t.Title, len(t.Prompt), MaxPromptChars)
+		}
+		switch strings.TrimSpace(t.Verify) {
+		case "", "none", "deterministic", "llm":
+		default:
+			return fmt.Errorf("task %q: verify %q is invalid; use \"none\", \"deterministic\" or \"llm\" (empty defaults to deterministic)",
+				t.Title, t.Verify)
 		}
 		if len(t.DependsOn) > 1 {
 			return fmt.Errorf("task %q has %d parents; at most 1 is allowed (chain or fan-out only, no diamond dependencies in phase 1)",

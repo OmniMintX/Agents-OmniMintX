@@ -109,6 +109,21 @@ func (Merger) HasDiff(ctx context.Context, repo, branch, base string) (bool, err
 	return false, fmt.Errorf("git diff %s...%s: %w", base, branch, err)
 }
 
+// DiffText returns the textual diff of branch vs base (three-dot: from the
+// merge-base to branch, same range as HasDiff) for the tier-1 LLM verifier.
+// Output longer than maxBytes is cut at maxBytes with a truncation notice
+// appended (maxBytes <= 0 means unlimited).
+func (Merger) DiffText(ctx context.Context, repo, base, branch string, maxBytes int) (string, error) {
+	out, err := run(ctx, repo, "diff", "refs/heads/"+base+"...refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("git diff %s...%s: %w", base, branch, err)
+	}
+	if maxBytes > 0 && len(out) > maxBytes {
+		out = out[:maxBytes] + "\n[diff truncated]"
+	}
+	return out, nil
+}
+
 // HasUncommitted reports whether dir has uncommitted changes (tracked or
 // untracked), ignoring the exclude pathspecs (e.g. the .om-done.* markers).
 func (Merger) HasUncommitted(ctx context.Context, dir string, exclude []string) (bool, error) {

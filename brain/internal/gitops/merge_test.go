@@ -313,6 +313,35 @@ func TestHasDiffThreeDot(t *testing.T) {
 	}
 }
 
+// TestDiffTextThreeDot: DiffText returns the branch's own changes vs the
+// merge-base (same three-dot range as HasDiff — sibling merges into main
+// never leak in), and truncates at maxBytes with a notice.
+func TestDiffTextThreeDot(t *testing.T) {
+	repo := newRepo(t)
+	addBranch(t, repo, "feat-a", "a.txt", "A\n")
+	addBranch(t, repo, "feat-b", "b.txt", "B\n")
+	if _, err := (Merger{}).Merge(ctx, repo, "feat-a", "main", "m a"); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := Merger{}.DiffText(ctx, repo, "main", "feat-b", 0)
+	if err != nil {
+		t.Fatalf("DiffText: %v", err)
+	}
+	if !strings.Contains(diff, "b.txt") || !strings.Contains(diff, "+B") {
+		t.Fatalf("diff must show feat-b's change:\n%s", diff)
+	}
+	if strings.Contains(diff, "a.txt") {
+		t.Fatalf("sibling merge must not leak into the diff:\n%s", diff)
+	}
+	cut, err := Merger{}.DiffText(ctx, repo, "main", "feat-b", 10)
+	if err != nil {
+		t.Fatalf("DiffText truncated: %v", err)
+	}
+	if !strings.HasSuffix(cut, "[diff truncated]") || len(cut) > 10+len("\n[diff truncated]") {
+		t.Fatalf("want 10-byte cut + notice, got %d bytes: %q", len(cut), cut)
+	}
+}
+
 // TestCommitWorktreeRescue: uncommitted files in a session worktree are
 // staged and committed (marker files excluded); a clean worktree is a
 // no-op; WorktreeFor finds the branch's worktree.

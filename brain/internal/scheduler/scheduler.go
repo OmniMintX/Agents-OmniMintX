@@ -28,11 +28,13 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"time"
 
 	"github.com/OmniMintX/overmind/internal/aoclient"
 	"github.com/OmniMintX/overmind/internal/gitops"
 	"github.com/OmniMintX/overmind/internal/store"
+	"github.com/OmniMintX/overmind/internal/verifier"
 )
 
 // DoneMarkerPrefix prefixes the per-task completion marker file name:
@@ -64,6 +66,22 @@ type LocalMerger interface {
 	HasDiff(ctx context.Context, repo, branch, base string) (bool, error)
 	HasUncommitted(ctx context.Context, dir string, exclude []string) (bool, error)
 	CommitWorktree(ctx context.Context, dir, msg string, exclude []string) (gitops.CommitResult, error)
+	DiffText(ctx context.Context, repo, base, branch string, maxBytes int) (string, error)
+}
+
+// Verifier is the tier-1 LLM gate: it grades one finished task's diff
+// AFTER tier 0 and the system-commit. verifier.Verify with the
+// roles.verifier LLM satisfies it (via VerifyFunc); a nil Scheduler.Verify
+// skips tier 1 entirely.
+type Verifier interface {
+	Verify(ctx context.Context, in verifier.Input) (verifier.Verdict, error)
+}
+
+// VerifyFunc adapts a plain function to the Verifier interface.
+type VerifyFunc func(ctx context.Context, in verifier.Input) (verifier.Verdict, error)
+
+func (f VerifyFunc) Verify(ctx context.Context, in verifier.Input) (verifier.Verdict, error) {
+	return f(ctx, in)
 }
 
 // Config are the scheduler knobs (from ~/.overmind/config.yaml).
@@ -76,6 +94,11 @@ type Config struct {
 	LockStaleAfter      time.Duration // run-lock heartbeat freshness (default 60s)
 	MaxBackoff          time.Duration // AO-unreachable backoff cap (default 60s)
 	CheckTimeout        time.Duration // tier-0 check command budget (default 5m)
+	// MaxVerifyRounds is the per-task retry budget on a verify fail
+	// (tier 0 or 1): 0 means fail on the first verify fail. The consumed
+	// rounds are derived from task_retry events (DerivedState.VerifyRounds),
+	// never from in-memory state.
+	MaxVerifyRounds int
 }
 
 func (c Config) withDefaults() Config {
@@ -103,6 +126,9 @@ func (c Config) withDefaults() Config {
 	if c.CheckTimeout <= 0 {
 		c.CheckTimeout = 5 * time.Minute
 	}
+	if c.MaxVerifyRounds < 0 {
+		c.MaxVerifyRounds = 0
+	}
 	return c
 }
 
@@ -121,6 +147,9 @@ type Scheduler struct {
 	// RunCheck executes the planner's per-task tier-0 check command inside
 	// the session worktree (default: sh -c, capped by Cfg.CheckTimeout).
 	RunCheck func(ctx context.Context, dir, command string) (output string, err error)
+	// Verify is the tier-1 LLM verifier for tasks with verify=llm. nil
+	// skips tier 1 (om run fails fast earlier when the plan needs it).
+	Verify Verifier
 }
 
 // taskClock tracks per-task timing observed by THIS process. It resets on
@@ -133,6 +162,8 @@ type taskClock struct {
 	blockedNoted    bool      // merge_blocked already recorded for the current streak
 	verified        bool      // tier-0 verify passed (blocked-merge re-polls skip it)
 	systemCommitted bool      // system-commit step already performed
+	verified1       bool      // tier-1 verify passed (blocked-merge re-polls skip it)
+	llmErrs         int       // consecutive tier-1 LLM transport/call failures
 }
 
 // runner is the per-run state of one Scheduler.Run invocation.
@@ -170,9 +201,23 @@ func taskHash8(planID, taskID string) string {
 }
 
 // displayNameFor builds the AO session display name that doubles as the
-// idempotent-dispatch marker. Always 11 runes, under AO's 20-rune cap.
+// idempotent-dispatch marker (verify round 0). Always 11 runes, under AO's
+// 20-rune cap.
 func displayNameFor(planID, taskID string) string {
 	return "om-" + taskHash8(planID, taskID)
+}
+
+// displayNameForRound is the round-aware displayName: round 0 keeps the
+// original hash (backward compatible with pre-retry sessions); round > 0
+// hashes the round in so each retry is its own idempotent-dispatch marker
+// (reconcileDispatching must look for the CURRENT round's session, never
+// adopt a previous round's).
+func displayNameForRound(planID, taskID string, round int) string {
+	if round <= 0 {
+		return displayNameFor(planID, taskID)
+	}
+	sum := sha256.Sum256([]byte(planID + "\x00" + taskID + "\x00r" + strconv.Itoa(round)))
+	return "om-" + hex.EncodeToString(sum[:4])
 }
 
 // markerPathFor is the repo-root file the task's agent must create as its

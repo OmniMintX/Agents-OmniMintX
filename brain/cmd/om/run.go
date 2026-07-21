@@ -16,6 +16,7 @@ import (
 	"github.com/OmniMintX/overmind/internal/gitops"
 	"github.com/OmniMintX/overmind/internal/scheduler"
 	"github.com/OmniMintX/overmind/internal/store"
+	"github.com/OmniMintX/overmind/internal/verifier"
 )
 
 // openStore opens the Overmind DB, creating its directory when missing
@@ -38,6 +39,10 @@ func runRun(cfg config.Config, planID string) error {
 	defer st.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	verify, err := verifierFor(cfg, st, planID)
+	if err != nil {
+		return err
+	}
 	s := &scheduler.Scheduler{
 		St:  st,
 		AO:  aoclient.New(cfg.AOBaseURL),
@@ -48,9 +53,11 @@ func runRun(cfg config.Config, planID string) error {
 			TaskTimeout:         time.Duration(cfg.TaskTimeoutMin) * time.Minute,
 			NoSignalTimeout:     time.Duration(cfg.NoSignalTimeoutMin) * time.Minute,
 			IdleNoMarkerTimeout: time.Duration(cfg.IdleNoMarkerTimeoutMin) * time.Minute,
+			MaxVerifyRounds:     cfg.MaxVerifyRounds,
 		},
-		PID: int64(os.Getpid()),
-		Log: os.Stdout,
+		PID:    int64(os.Getpid()),
+		Log:    os.Stdout,
+		Verify: verify,
 	}
 	if err := s.Run(ctx, planID); err != nil {
 		if ctx.Err() != nil {
@@ -60,6 +67,35 @@ func runRun(cfg config.Config, planID string) error {
 		return err
 	}
 	return nil
+}
+
+// verifierFor builds the tier-1 LLM verifier when the plan has at least
+// one verify=llm task, failing FAST (before any dispatch) when the config
+// lacks a usable roles.verifier. Plans without llm-verified tasks run with
+// no verifier at all.
+func verifierFor(cfg config.Config, st *store.Store, planID string) (scheduler.Verifier, error) {
+	tasks, err := st.GetTasks(planID)
+	if err != nil {
+		return nil, fmt.Errorf("load tasks of plan %s: %w", planID, err)
+	}
+	needed := false
+	for _, t := range tasks {
+		if t.Verify == "llm" {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return nil, nil
+	}
+	llm, llmDesc, err := newRoleLLM(cfg, "verifier")
+	if err != nil {
+		return nil, fmt.Errorf("plan %s has verify=llm tasks but no usable verifier LLM: %w", planID, err)
+	}
+	fmt.Printf("Tier-1 verification with %s\n", llmDesc)
+	return scheduler.VerifyFunc(func(ctx context.Context, in verifier.Input) (verifier.Verdict, error) {
+		return verifier.Verify(ctx, llm, in)
+	}), nil
 }
 
 // runStatus is `om status [plan-id]`: without an id, list all plans; with

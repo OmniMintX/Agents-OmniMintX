@@ -33,6 +33,7 @@ type Task struct {
 	Prompt    string
 	Harness   string
 	Check     string   // tier-0 verify command run in the worktree (may be empty)
+	Verify    string   // verify strategy: none|deterministic|llm (empty input defaults to deterministic)
 	DependsOn []string // task IDs (at most one in phase 1)
 }
 

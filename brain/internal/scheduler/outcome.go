@@ -36,9 +36,9 @@ func (r *runner) finishTask(ctx context.Context, t store.Task, sess aoclient.Ses
 // failTaskKind records task_failed with the standardized payload:
 // {reason, kind, session_id?, ...extra}. kind is one of marker_fail |
 // marker_malformed | marker_missing | marker_check_failed | timeout |
-// no_signal | session_lost | verify_failed | system_commit_failed |
-// merge_conflict | merge_failed | create_failed | internal |
-// dependency_failed.
+// no_signal | session_lost | verify_budget_exhausted | verify_error |
+// system_commit_failed | merge_conflict | merge_failed | create_failed |
+// internal | dependency_failed.
 func (r *runner) failTaskKind(t store.Task, kind, reason, sessionID string, extra map[string]any) error {
 	payload := map[string]any{"reason": reason, "kind": kind}
 	if sessionID != "" {

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -27,7 +28,7 @@ func (r *runner) tick(ctx context.Context) error {
 	}
 	for _, t := range tasks {
 		if st.TaskStatus[t.ID] == store.TaskDispatching {
-			if err := r.reconcileDispatching(ctx, t); err != nil {
+			if err := r.reconcileDispatching(ctx, t, st.VerifyRounds[t.ID]); err != nil {
 				return err
 			}
 		}
@@ -47,12 +48,15 @@ func (r *runner) tick(ctx context.Context) error {
 // (crash between task_dispatching and task_dispatched): if a session with
 // our displayName marker already exists, adopt it; otherwise the HTTP call
 // never landed, so dispatch again. This is what makes dispatch idempotent.
-func (r *runner) reconcileDispatching(ctx context.Context, t store.Task) error {
+// round is the task's CURRENT verify round from derived state: a retry
+// dispatch must only ever adopt the current round's session, never a
+// previous round's (their displayNames differ by construction).
+func (r *runner) reconcileDispatching(ctx context.Context, t store.Task, round int) error {
 	sessions, err := r.AO.ListSessions(ctx, aoclient.ListSessionsFilter{Project: r.plan.ProjectID})
 	if err != nil {
 		return err
 	}
-	want := displayNameFor(r.plan.ID, t.ID)
+	want := displayNameForRound(r.plan.ID, t.ID, round)
 	var match *aoclient.Session
 	for i := range sessions {
 		s := &sessions[i]
@@ -67,7 +71,7 @@ func (r *runner) reconcileDispatching(ctx context.Context, t store.Task) error {
 	}
 	if match == nil {
 		r.logf("task %s: dispatch intent had no session, re-dispatching", t.ID)
-		return r.createAndDispatch(ctx, t)
+		return r.createAndDispatch(ctx, t, round)
 	}
 	r.logf("task %s: adopted existing session %s", t.ID, match.ID)
 	return r.St.DispatchTask(r.plan.ID, t.ID, r.runID, match.ID, match.Branch)
@@ -119,7 +123,7 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 			}
 			continue
 		}
-		if err := r.createAndDispatch(ctx, t); err != nil {
+		if err := r.createAndDispatch(ctx, t, st.VerifyRounds[t.ID]); err != nil {
 			return err
 		}
 		active++
@@ -130,15 +134,24 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 // createAndDispatch performs the CreateSession call for a task already in
 // the dispatching state, then records task_dispatched. The scheduler
 // appends the marker-protocol footer here (never trusting the planner LLM
-// to relay it). Non-transport create errors (validation, 4xx) fail the
-// task, not the plan.
-func (r *runner) createAndDispatch(ctx context.Context, t store.Task) error {
+// to relay it); round > 0 re-dispatches also inject the latest verify
+// feedback (from the task_retry event, so it survives crashes). The whole
+// prompt is kept within AO's 4096-byte cap. Non-transport create errors
+// (validation, 4xx) fail the task, not the plan.
+func (r *runner) createAndDispatch(ctx context.Context, t store.Task, round int) error {
+	feedback := ""
+	if round > 0 {
+		var err error
+		if feedback, err = r.retryFeedback(t.ID); err != nil {
+			return err
+		}
+	}
 	sess, err := r.AO.CreateSession(ctx, aoclient.SpawnSessionRequest{
 		ProjectID:   r.plan.ProjectID,
 		Kind:        "worker",
 		Harness:     aoclient.Harness(t.Harness),
-		Prompt:      promptWithFooter(t.Prompt, markerPathFor(r.plan.ID, t.ID)),
-		DisplayName: displayNameFor(r.plan.ID, t.ID),
+		Prompt:      promptWithFeedbackAndFooter(t.Prompt, feedback, markerPathFor(r.plan.ID, t.ID)),
+		DisplayName: displayNameForRound(r.plan.ID, t.ID, round),
 	})
 	if err != nil {
 		if isTransport(err) {
@@ -149,8 +162,30 @@ func (r *runner) createAndDispatch(ctx context.Context, t store.Task) error {
 	if err := r.St.DispatchTask(r.plan.ID, t.ID, r.runID, sess.ID, sess.Branch); err != nil {
 		return err
 	}
-	r.logf("task %s: dispatched as session %s (branch %s)", t.ID, sess.ID, sess.Branch)
+	r.logf("task %s: dispatched as session %s (branch %s, round %d)", t.ID, sess.ID, sess.Branch, round)
 	return nil
+}
+
+// retryFeedback returns the feedback text of the task's LATEST task_retry
+// event (recorded when a verify round failed). Reading it from the event
+// log — not memory — keeps retry prompts correct across crash/resume.
+func (r *runner) retryFeedback(taskID string) (string, error) {
+	events, err := r.St.ListEvents(r.plan.ID)
+	if err != nil {
+		return "", err
+	}
+	feedback := ""
+	for _, e := range events {
+		if e.Type == store.EventTaskRetry && e.TaskID != nil && *e.TaskID == taskID {
+			var p struct {
+				Feedback string `json:"feedback"`
+			}
+			if json.Unmarshal([]byte(e.PayloadJSON), &p) == nil {
+				feedback = p.Feedback
+			}
+		}
+	}
+	return feedback, nil
 }
 
 // ensureParentsMerged verifies every dependency's branch is an ancestor of

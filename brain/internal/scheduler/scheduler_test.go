@@ -407,7 +407,7 @@ func TestRunPrecheckOriginRefusal(t *testing.T) {
 
 // TestRunVerifyEmptyDiffFails: tier 0 must fail a task whose branch has no
 // diff vs the base AND no uncommitted work — with task_verdict(fail,
-// tier=0), kind=verify_failed, and NO merge.
+// tier=0), kind=verify_budget_exhausted (budget 0), and NO merge.
 func TestRunVerifyEmptyDiffFails(t *testing.T) {
 	st, ao, git, s := newHarnessGit(t, []store.NewTask{nt("a1234567")}, Config{})
 	ao.scripts[displayNameFor("plan-1", "a1234567")] = doneScript(0)
@@ -434,8 +434,8 @@ func TestRunVerifyEmptyDiffFails(t *testing.T) {
 	if !strings.Contains(verdict, `"verdict":"fail"`) || !strings.Contains(verdict, `"tier":0`) {
 		t.Fatalf("want task_verdict fail tier 0, got %q", verdict)
 	}
-	if !strings.Contains(failed, `"kind":"verify_failed"`) || !strings.Contains(failed, "empty diff") {
-		t.Fatalf("want task_failed kind=verify_failed with empty-diff reason, got %q", failed)
+	if !strings.Contains(failed, `"kind":"verify_budget_exhausted"`) || !strings.Contains(failed, "empty diff") {
+		t.Fatalf("want task_failed kind=verify_budget_exhausted with empty-diff reason, got %q", failed)
 	}
 }
 
@@ -505,7 +505,8 @@ func TestRunCheckCommandPasses(t *testing.T) {
 }
 
 // TestRunCheckCommandFails: a failing check command must fail the task at
-// tier 0 with the check output in the payload and no merge.
+// tier 0 (budget 0: kind=verify_budget_exhausted) with the check output in
+// the payload and no merge.
 func TestRunCheckCommandFails(t *testing.T) {
 	task := nt("a1234567")
 	task.Check = "go test ./..."
@@ -527,13 +528,13 @@ func TestRunCheckCommandFails(t *testing.T) {
 	found := false
 	for _, e := range events {
 		if e.Type == store.EventTaskFailed &&
-			strings.Contains(e.PayloadJSON, `"kind":"verify_failed"`) &&
+			strings.Contains(e.PayloadJSON, `"kind":"verify_budget_exhausted"`) &&
 			strings.Contains(e.PayloadJSON, "TestX broke") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("task_failed payload must carry kind=verify_failed and the check output")
+		t.Fatal("task_failed payload must carry kind=verify_budget_exhausted and the check output")
 	}
 }
 

@@ -21,6 +21,7 @@ no commentary, no extra fields:
       "prompt": "full self-contained instructions for the agent",
       "harness": "one of the available harness IDs",
       "check": "one shell command verifying the task's definition of done",
+      "verify": "none | deterministic | llm — how the finished task is verified",
       "depends_on": ["title of the prerequisite task, if any"]
     }
   ]
@@ -47,3 +48,9 @@ HARD RULES:
    of done holds (e.g. "test -s reply.txt", "go build ./...", "npm test").
    Keep it fast and deterministic. Use "" only when no meaningful command
    exists.
+7. "verify" picks the verification strategy: "deterministic" when the
+   "check" command alone proves the definition of done; "llm" when a
+   shell command cannot capture it and the diff needs semantic review
+   (e.g. code quality, refactors, API design, prose); "none" only for
+   trivial tasks where verification adds nothing. When unsure, use
+   "deterministic".

@@ -106,9 +106,11 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 	switch verdict {
 	case markerOK:
 		ck.markerBad = false
-		// Pipeline (OM-9): ok marker -> tier-0 verify -> system-commit ->
-		// local merge. Verify/commit run once per task (flags on the task
-		// clock); a blocked merge re-polls only the merge step.
+		// Pipeline (OM-9/OM-10): ok marker -> tier-0 verify -> system-commit
+		// -> tier-1 LLM verify -> local merge. Verify/commit run once per
+		// task (flags on the task clock); a blocked merge re-polls only the
+		// merge step. Tier 1 runs AFTER the system-commit so the graded diff
+		// includes rescued work.
 		branch := sess.Branch
 		if branch == "" && t.Branch != nil {
 			branch = *t.Branch
@@ -129,6 +131,13 @@ func (r *runner) resolveTerminal(ctx context.Context, t store.Task, sess aoclien
 				return err
 			}
 			ck.systemCommitted = true
+		}
+		if t.Verify == "llm" && r.Verify != nil && !ck.verified1 {
+			proceed, err := r.verifyTier1(ctx, t, sess, branch, ck)
+			if err != nil || !proceed {
+				return err
+			}
+			ck.verified1 = true
 		}
 		proceed, err := r.mergeTaskBranch(ctx, t, sess, branch)
 		if err != nil || !proceed {
@@ -213,14 +222,19 @@ func (r *runner) verifyTier0(ctx context.Context, t store.Task, sess aoclient.Se
 	return true, nil
 }
 
-// failTier0 records task_verdict(fail, tier=0) then fails the task with
-// kind=verify_failed (Phase: retry-with-feedback is OM-10; fail straight).
+// failTier0 records task_verdict(fail, tier=0) then retries the task with
+// the failure as feedback — or fails it (kind=verify_budget_exhausted)
+// when the retry budget is spent (OM-10 retry-with-feedback).
 func (r *runner) failTier0(ctx context.Context, t store.Task, sess aoclient.Session, reason string, extra map[string]any) (bool, error) {
 	payload := jsonPayload(map[string]any{"verdict": "fail", "tier": 0, "reason": reason})
 	if err := r.St.RecordTaskVerdict(r.plan.ID, t.ID, r.runID, payload); err != nil {
 		return false, err
 	}
-	return false, r.killAndFailKind(ctx, t, sess, "verify_failed", reason, extra)
+	feedback := reason
+	if out, ok := extra["check_output"].(string); ok && out != "" {
+		feedback += "\nCheck output:\n" + out
+	}
+	return r.retryOrFail(ctx, t, sess, 0, reason, feedback, extra)
 }
 
 // systemCommit stages and commits whatever the worker left uncommitted in

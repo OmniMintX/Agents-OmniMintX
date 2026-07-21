@@ -129,6 +129,39 @@ func TestParseCheckField(t *testing.T) {
 	}
 }
 
+// TestParseVerifyField: verify accepts none|deterministic|llm, trims
+// whitespace, and defaults to deterministic when absent (back-compat with
+// pre-OM-10 plans that have no verify field).
+func TestParseVerifyField(t *testing.T) {
+	fx := planFixture(t,
+		taskJSON{Title: "a", Prompt: okPrompt("A."), Harness: "codex", Verify: "  llm  "},
+		taskJSON{Title: "b", Prompt: okPrompt("B."), Harness: "codex", Verify: "none"},
+		taskJSON{Title: "c", Prompt: okPrompt("C."), Harness: "codex", Verify: "deterministic"},
+		taskJSON{Title: "d", Prompt: okPrompt("D."), Harness: "codex"},
+	)
+	plan, err := Parse([]byte(fx), testHarnesses)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for i, want := range []string{"llm", "none", "deterministic", "deterministic"} {
+		if plan.Tasks[i].Verify != want {
+			t.Errorf("task %d verify = %q, want %q", i, plan.Tasks[i].Verify, want)
+		}
+	}
+}
+
+// TestParseVerifyRejectsUnknown: any verify value outside the three allowed
+// strategies must fail validation with a clear error.
+func TestParseVerifyRejectsUnknown(t *testing.T) {
+	fx := planFixture(t,
+		taskJSON{Title: "a", Prompt: okPrompt("A."), Harness: "codex", Verify: "magic"},
+	)
+	_, err := Parse([]byte(fx), testHarnesses)
+	if err == nil || !strings.Contains(err.Error(), `verify "magic" is invalid`) {
+		t.Fatalf("want invalid-verify error, got %v", err)
+	}
+}
+
 // TestParseNoMarkerRequired: the completion-marker protocol is injected by
 // the scheduler at dispatch, so a prompt without any marker mention is valid.
 func TestParseNoMarkerRequired(t *testing.T) {
@@ -191,7 +224,7 @@ func TestGeneratePromptContents(t *testing.T) {
 		t.Fatalf("want exactly 1 LLM call, got %d", len(llm.prompts))
 	}
 	p := llm.prompts[0]
-	for _, want := range []string{"build the thing", "claude-code", "codex", "3500", "definition of done"} {
+	for _, want := range []string{"build the thing", "claude-code", "codex", "3500", "definition of done", "verify"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}

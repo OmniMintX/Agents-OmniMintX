@@ -68,6 +68,28 @@ func promptWithFooter(prompt, markerPath string) string {
 	return prompt + fmt.Sprintf(promptFooterFmt, markerPath)
 }
 
+// maxSpawnPrompt is AO's hard cap on spawn prompt size (bytes).
+const maxSpawnPrompt = 4096
+
+// feedbackHeader introduces the verifier feedback block on a re-dispatch.
+const feedbackHeader = "\n\n--- VERIFIER FEEDBACK (previous attempt was rejected; fix these) ---\n"
+
+// promptWithFeedbackAndFooter builds the spawn prompt for a (re-)dispatch:
+// task prompt + optional verifier feedback + the marker protocol footer.
+// The feedback is truncated so the whole prompt stays within AO's
+// 4096-byte cap — the footer is never truncated (the marker protocol must
+// survive intact).
+func promptWithFeedbackAndFooter(prompt, feedback, markerPath string) string {
+	footer := fmt.Sprintf(promptFooterFmt, markerPath)
+	if feedback != "" {
+		budget := maxSpawnPrompt - len(prompt) - len(footer) - len(feedbackHeader)
+		if budget > 0 {
+			prompt += feedbackHeader + truncate(feedback, budget)
+		}
+	}
+	return prompt + footer
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
