@@ -605,3 +605,128 @@ run 3 dùng /tmp/om build lại kèm fix EnsureExcluded.
   hay tmux session om-e2e6. GIỮ hiện trường:
   repo /tmp/om-e2e6-1784648067, logs /tmp/om-e2e6-run.log /tmp/om-e2e6-run2.log,
   ~/.overmind/overmind.db, ~/.overmind/config.yaml.
+
+
+---
+
+## Nhật ký chạy thật — lần 7, 2026-07-22: approval gates + notification (OM-12)
+
+**Verdict: OM-12 PASS cả 4 kịch bản** — gate chặn THẬT trước dispatch (không
+AO session nào được tạo cho task chưa approve, kể cả sau kill-resume),
+approve/reject từ process khác có hiệu lực trong ≤ 1 tick, reject cascade
+đúng dependents và không lây nhánh độc lập, notification osascript bắn thật
+ra Notification Center ở cả 3 loại sự kiện. Máy Mac mini, AO daemon port
+3001, om build từ HEAD a66bae8 (Wave 1 e60947b + Wave 2 a66bae8),
+`--autonomy=bypass-permissions` (opt-in `autonomy_allow_bypass: true` sẵn từ
+lần 6), notify default `auto`. Giờ trong log sự kiện SQLite là UTC; giờ
+terminal bên dưới là local (UTC+7).
+
+### Setup
+- Repo test `/tmp/om-e2e7-1784661495`: commit đầu README + 3 file "dữ liệu
+  cũ" để các task destructive xóa (`legacy.txt`, `old-data.txt`,
+  `legacy2.txt`). Đăng ký AO project tự động qua `om plan` (201).
+- **Planner TỰ GÁN `requires_approval` từ wording goal** (prompt rule OM-12a
+  "destructive/irreversible"): cả 3 plan đều đúng task cần gate — đối chiếu
+  vật lý cột DB `tasks.requires_approval` = 1 đúng task, 0 các task còn lại.
+  Không cần `--edit` override.
+
+### Kịch bản 1 — gate chặn sống + om run chờ (plan p-f940e135): PASS
+- Goal 2 task chained: t1 tạo `greeting.txt`; t2 (depends t1) XÓA
+  `legacy.txt` + tạo `reply.txt` quote greeting — planner gán t2
+  requires_approval=1.
+- Run: t1 dispatch → tier-0 pass → merge 81966b2 → DONE. Đến lượt t2:
+  log `task t2: AWAITING APPROVAL — om approve-task p-f940e135 t2`;
+  **om run KHÔNG thoát, đứng chờ** (pid 21769 alive, xác nhận pgrep).
+- Bằng chứng vật lý: event 130 `task_approval_requested` t2 (KHÔNG có
+  task_dispatching t2); `om status` in t2 `awaiting_approval` + dòng hint
+  approve/reject; AO sessions của project chỉ có `-1` (t1) — **không session
+  nào cho t2 trước khi approve**; git log chỉ có t1.
+- Notification bắn đúng lúc gate đóng: unified log 02:19:38 osascript
+  (pid 23140) gửi AppleEvent `syso,notf` (= `display notification`) + mở XPC
+  `com.apple.usernoted.daemon_client` — notification đã vào Notification
+  Center. Log om run KHÔNG có warning fallback → osascript exit 0.
+
+### Kịch bản 2 — approve từ terminal khác (cùng plan): PASS
+- `om approve-task p-f940e135 t2` từ process thứ hai lúc 02:22:07 →
+  event 131 `task_approved` 19:22:07(UTC) → **132 `task_dispatching`
+  19:22:08 — trễ đúng 1 giây, trong 1 poll interval (15s)**.
+- t2 session `-2` chạy → tier-0 pass → merge b15e467 → `plan_done` (138).
+  Đếm event t2: đúng 1 của MỖI loại (approval_requested / approved /
+  dispatching / dispatched / started / verdict / branch_merged / done) —
+  không dispatch trùng.
+- Git log repo test: commit a2f1aa6 "Remove legacy.txt and add reply.txt",
+  merge b15e467; `main:reply.txt` quote đúng `hello-om-e2e7-1784661495`;
+  `legacy.txt` biến mất khỏi worktree. Notification thứ hai 02:23:08
+  (osascript syso,notf) = "Overmind: plan done", khớp `plan_done` 19:23:08.
+
+### Kịch bản 3 — reject cascade, nhánh độc lập không lây (plan p-608669ee): PASS
+- DAG 4 task: t1 tạo note.txt → t2 (requires_approval=1) XÓA old-data.txt →
+  t3 tạo summary.txt; t4 ĐỘC LẬP tạo independent.txt.
+- t1 + t4 dispatch song song, cả hai done + merge (t4 44a3548, t1 2646d2e).
+  t2 vào awaiting_approval (event 154, notification 02:24:57).
+- `om reject-task p-608669ee t2 --reason "e2e7: từ chối xóa old-data.txt"`
+  lúc 02:26:56 → event 155 `task_failed
+  {"kind":"rejected","reason":"e2e7: từ chối xóa old-data.txt"}` →
+  cascade tick sau: 156 `task_dispatching` t3 + 157 `task_failed`
+  `{"kind":"dependency_failed","reason":"dependency t2 failed"}` → 158
+  `plan_failed {"failed_tasks":["t2","t3"],"reason":"no runnable tasks
+  remain"}`. Notification 02:26:57 = plan failed.
+- Đối chiếu vật lý: `om status` t1/t4 done, t2/t3 failed; **`old-data.txt`
+  VẪN CÒN trên main** (reject chặn được việc xóa — đúng mục đích gate);
+  `summary.txt` không tồn tại; KHÔNG AO session nào cho t2/t3 (project chỉ
+  có `-3`, `-4` của t1/t4). t4 độc lập done bình thường — không bị lây.
+- Quan sát sống follow-up non-blocking #1 (đã ghi nhận ở Wave 2, KHÔNG vá):
+  event 156 `task_dispatching` "giả" trên t3 trong cascade (FailTask không
+  có transition pending→failed nên đi vòng qua dispatching) — đúng như
+  spec đã mô tả, không phải bug mới.
+
+### Kịch bản 4 — kill giữa awaiting_approval, resume giữ gate (plan p-dc3d7687): PASS
+- Goal 2 task: t1 tạo alpha.txt; t2 (requires_approval=1) XÓA legacy2.txt.
+  t1 done merge eca56d0; t2 awaiting (event 168, run-32def900cc95,
+  notification 02:28:25).
+- `kill -9 37970` (om run) lúc 02:31:09 — chết giữa lúc gate đang chờ.
+- Resume `om run p-dc3d7687` lúc 02:31:19: log `previous om run holder is
+  dead — taking over its run lock` (stale-lock takeover của OM-13),
+  event 169 `run_started` run-d98cc9ad6234. Sau > 1 poll interval:
+  `om status` t2 VẪN `awaiting_approval`, **`task_approval_requested` vẫn
+  đếm = 1** (derive đưa t2 ra khỏi ready-list nên gate không re-fire —
+  idempotent qua replay, đúng thiết kế) và **KHÔNG re-notify** (không có
+  osascript nào giữa 02:28:25 và 02:34:05); t1 KHÔNG bị dispatch lại.
+- Approve 02:33:06 (event 170, ghi vào run mới) → 171/172 dispatching/
+  dispatched 02:33:19 (13s, ≤ 1 tick) → session `-6` → tier-0 pass → merge
+  8b5b9b9 → `plan_done` (177), notification 02:34:05.
+- Dedup toàn plan: t1 và t2 mỗi task đúng 1 `task_dispatching` + 1
+  `task_dispatched` dù có 2 `run_started` — không dispatch trùng qua
+  kill-resume. Git: 793b8a6 "Remove legacy2.txt", `legacy2.txt` biến mất.
+
+### Notification — những gì hiện trên macOS
+- Agent chạy E2E không nhìn được màn hình → bằng chứng vật lý qua unified
+  log (`/usr/bin/log show --predicate 'processImagePath CONTAINS
+  "osascript"'`): **6 lần osascript gửi AppleEvent `syso,notf` + XPC tới
+  `com.apple.usernoted.daemon_client`, khớp 1:1 với 6 sự kiện notify**:
+  02:19:38 approval-needed (A), 02:23:08 plan done (A), 02:24:57
+  approval-needed (B), 02:26:57 plan failed (B), 02:28:25 approval-needed
+  (C), 02:34:05 plan done (C).
+- Cả 3 log om run KHÔNG có dòng `Warning: desktop notification failed` và
+  không có bell `\a` → osascript exit 0 mọi lần, KHÔNG rơi fallback.
+- Hình thức trên màn hình (theo `notificationScript` + osascript chạy đạt):
+  banner Notification Center, title `Overmind: approval needed` /
+  `Overmind: plan done` / `Overmind: plan failed`, body ví dụ
+  `task t2 (Delete legacy.txt and create reply.txt) awaits approval —
+  om approve-task p-f940e135 t2` — copy được lệnh approve ngay từ banner.
+
+### Caveat / quan sát lần 7 (docs-only, không vá)
+1. **`om plan` chưa in cột APPROVAL** — design OM-12 nói bảng duyệt plan có
+   cột APPROVAL; hiện thực in ID/TITLE/HARNESS/DEPENDS ON/PROMPT. User vẫn
+   xem được qua `om status` (awaiting_approval + hint) và override qua
+   `--edit`; ghi nhận divergence nhỏ, không chặn DoD.
+2. Follow-up #1 (`task_dispatching` giả trong cascade) quan sát sống ở
+   kịch bản 3 — hành xử đúng như đã ghi nhận ở Wave 2.
+3. Planner (cli/claude) gán `requires_approval` đúng 3/3 plan khi goal nói
+   rõ destructive/irreversible — prompt rule OM-12a hoạt động, chưa cần
+   override tay lần nào.
+
+### Dọn dẹp
+- Cả 3 plan kết thúc (done/done/failed/done), không còn process `om run`.
+  GIỮ hiện trường: repo /tmp/om-e2e7-1784661495, logs
+  /tmp/om-e2e7-run{1,2,3,3b}.log, ~/.overmind/overmind.db.
