@@ -111,6 +111,66 @@ func (c *Client) AddProject(ctx context.Context, in AddProjectInput) (Project, e
 	return out.Project, nil
 }
 
+// GetProjectConfig returns a project's stored config. AO has no
+// GET /projects/{id}/config route — the route table only registers PUT for
+// config (backend/internal/httpd/controllers/projects.go:26-33) — so this
+// reads GET /api/v1/projects/{id}, whose Project read model carries the config
+// (backend/internal/service/project/types.go:17-27, `config,omitempty`).
+// The response wraps oneOf Project|Degraded under "project"
+// (controllers/dto.go:46-101); the Degraded variant (resolveError set,
+// service/project/types.go:29-36) has no config and surfaces as an error. A
+// project with no stored config decodes as the zero ProjectConfig.
+func (c *Client) GetProjectConfig(ctx context.Context, projectID string) (ProjectConfig, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return ProjectConfig{}, errors.New("aoclient: project id is required")
+	}
+	var out struct {
+		Project struct {
+			Config       *ProjectConfig `json:"config"`
+			ResolveError string         `json:"resolveError"`
+		} `json:"project"`
+	}
+	path := "/api/v1/projects/" + url.PathEscape(projectID)
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return ProjectConfig{}, err
+	}
+	if out.Project.ResolveError != "" {
+		return ProjectConfig{}, fmt.Errorf("aoclient: project %s is degraded (config unavailable): %s", projectID, out.Project.ResolveError)
+	}
+	if out.Project.Config == nil {
+		return ProjectConfig{}, nil
+	}
+	return *out.Project.Config, nil
+}
+
+// UpdateProjectConfig calls PUT /api/v1/projects/{id}/config with body
+// {"config": cfg}. The daemon REPLACES the stored config wholesale — NOT a
+// merge: "Config replaces the project's stored config wholesale; a zero-value
+// config clears it" (backend/internal/service/project/dto.go:31-35), and
+// Service.SetConfig assigns `row.Config = in.Config`
+// (service/project/service.go:513-533). Callers MUST therefore
+// GetProjectConfig first, mutate the returned value, and send it back whole;
+// ProjectConfig round-trips fields this client does not model so none are
+// erased. The daemon strict-decodes the body (unknown top-level keys are a
+// 400; controllers/projects.go:104-120,143-150) and answers 200 with the
+// updated {"project": ...} read model (projects.go:119).
+func (c *Client) UpdateProjectConfig(ctx context.Context, projectID string, cfg ProjectConfig) (Project, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return Project{}, errors.New("aoclient: project id is required")
+	}
+	body := struct {
+		Config ProjectConfig `json:"config"`
+	}{Config: cfg}
+	var out struct {
+		Project Project `json:"project"`
+	}
+	path := "/api/v1/projects/" + url.PathEscape(projectID) + "/config"
+	if err := c.do(ctx, http.MethodPut, path, nil, body, &out); err != nil {
+		return Project{}, err
+	}
+	return out.Project, nil
+}
+
 // ListAgents calls GET /api/v1/agents. The body is the inventory itself
 // (no wrapper key; envelope.WriteJSON writes it directly).
 // Route: backend/internal/httpd/controllers/agents.go:29.

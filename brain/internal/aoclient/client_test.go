@@ -370,6 +370,168 @@ func TestDaemonNotRunning(t *testing.T) {
 	}
 }
 
+// fullProjectConfigJSON is a stored config exercising fields this client does
+// not model (they must survive a GET → mutate → PUT round-trip because the
+// daemon replaces the config wholesale).
+const fullProjectConfigJSON = `{
+	"defaultBranch": "develop",
+	"sessionPrefix": "omni",
+	"env": {"FOO": "bar"},
+	"postCreate": ["make setup"],
+	"agentConfig": {"model": "claude-opus-4-5", "permissions": "default", "futureField": 7},
+	"worker": {"agent": "codex", "agentConfig": {"model": "gpt-5"}},
+	"trackerIntake": {"enabled": true}
+}`
+
+func TestGetProjectConfig(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// Config reads use GET /projects/{id}: AO registers no GET config route
+		// (backend/internal/httpd/controllers/projects.go:26-33).
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/projects/omni" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(fullProjectConfigJSON), &cfg); err != nil {
+			t.Fatalf("parse fixture: %v", err)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": map[string]any{
+				"id": "omni", "name": "OmniMintX", "kind": "repo",
+				"path": "/repo", "repo": "org/omni", "defaultBranch": "develop",
+				"config": cfg,
+			},
+		})
+	})
+	cfg, err := c.GetProjectConfig(context.Background(), "omni")
+	if err != nil {
+		t.Fatalf("GetProjectConfig: %v", err)
+	}
+	if cfg.AgentConfig.Model != "claude-opus-4-5" || cfg.AgentConfig.Permissions != PermissionDefault {
+		t.Fatalf("unexpected agentConfig: %+v", cfg.AgentConfig)
+	}
+	if cfg.IsZero() {
+		t.Fatal("config with settings must not be zero")
+	}
+}
+
+func TestGetProjectConfigEmpty(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// Project.Config is `config,omitempty` (service/project/types.go:25):
+		// a project with no stored config omits the key entirely.
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": map[string]any{
+				"id": "omni", "name": "OmniMintX", "kind": "repo",
+				"path": "/repo", "repo": "org/omni", "defaultBranch": "main",
+			},
+		})
+	})
+	cfg, err := c.GetProjectConfig(context.Background(), "omni")
+	if err != nil {
+		t.Fatalf("GetProjectConfig: %v", err)
+	}
+	if !cfg.IsZero() {
+		t.Fatalf("want zero config, got %+v", cfg)
+	}
+}
+
+func TestGetProjectConfigDegraded(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// Degraded variant (service/project/types.go:29-36) has no config.
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": map[string]any{
+				"id": "omni", "name": "OmniMintX", "kind": "repo",
+				"path": "/repo", "resolveError": "config blob corrupt",
+			},
+		})
+	})
+	_, err := c.GetProjectConfig(context.Background(), "omni")
+	if err == nil || !strings.Contains(err.Error(), "degraded") {
+		t.Fatalf("want degraded error, got %v", err)
+	}
+}
+
+func TestGetProjectConfigNotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(t, w, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "Unknown project")
+	})
+	_, err := c.GetProjectConfig(context.Background(), "ghost")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "PROJECT_NOT_FOUND" || apiErr.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("want PROJECT_NOT_FOUND APIError, got %v", err)
+	}
+}
+
+func TestUpdateProjectConfig(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/projects/omni/config" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Config map[string]json.RawMessage `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		// PUT replaces the stored config wholesale (service/project/dto.go:31-35),
+		// so every unmodeled field from the earlier GET must be echoed back.
+		for _, key := range []string{"defaultBranch", "sessionPrefix", "env", "postCreate", "worker", "trackerIntake"} {
+			if _, ok := body.Config[key]; !ok {
+				t.Fatalf("round-trip dropped %q: %v", key, body.Config)
+			}
+		}
+		var ac map[string]json.RawMessage
+		if err := json.Unmarshal(body.Config["agentConfig"], &ac); err != nil {
+			t.Fatalf("decode agentConfig: %v", err)
+		}
+		if string(ac["permissions"]) != `"accept-edits"` {
+			t.Fatalf("want mutated permissions, got %s", ac["permissions"])
+		}
+		if string(ac["model"]) != `"claude-opus-4-5"` || string(ac["futureField"]) != "7" {
+			t.Fatalf("agentConfig round-trip dropped fields: %v", ac)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": map[string]any{
+				"id": "omni", "name": "OmniMintX", "kind": "repo",
+				"path": "/repo", "repo": "org/omni", "defaultBranch": "develop",
+			},
+		})
+	})
+	var cfg ProjectConfig
+	if err := json.Unmarshal([]byte(fullProjectConfigJSON), &cfg); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	cfg.AgentConfig.Permissions = PermissionAcceptEdits
+	p, err := c.UpdateProjectConfig(context.Background(), "omni", cfg)
+	if err != nil {
+		t.Fatalf("UpdateProjectConfig: %v", err)
+	}
+	if p.ID != "omni" {
+		t.Fatalf("unexpected project: %+v", p)
+	}
+}
+
+func TestUpdateProjectConfigNotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(t, w, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "Unknown project")
+	})
+	_, err := c.UpdateProjectConfig(context.Background(), "ghost", ProjectConfig{})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "PROJECT_NOT_FOUND" {
+		t.Fatalf("want PROJECT_NOT_FOUND APIError, got %v", err)
+	}
+}
+
+func TestProjectConfigValidation(t *testing.T) {
+	c := New("")
+	ctx := context.Background()
+	if _, err := c.GetProjectConfig(ctx, ""); err == nil {
+		t.Fatal("want error for empty project id on get")
+	}
+	if _, err := c.UpdateProjectConfig(ctx, "  ", ProjectConfig{}); err == nil {
+		t.Fatal("want error for blank project id on update")
+	}
+}
+
 func TestNonEnvelopeError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

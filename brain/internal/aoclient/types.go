@@ -11,7 +11,10 @@
 //   - internal/httpd/apispec/openapi.yaml        (generated spec)
 package aoclient
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Daemon-enforced input limits, mirrored client-side to fail fast.
 // Source: backend/internal/httpd/controllers/sessions.go:26-28.
@@ -169,6 +172,145 @@ type AddProjectInput struct {
 	ProjectID   *string `json:"projectId,omitempty"`
 	Name        *string `json:"name,omitempty"`
 	AsWorkspace bool    `json:"asWorkspace,omitempty"`
+}
+
+// PermissionMode is AO's typed agent permission vocabulary.
+// Source: backend/internal/domain/agentconfig.go:9-21.
+type PermissionMode string
+
+// The permission modes AO adapters map onto their agent's native approval
+// flags (e.g. claude-code --permission-mode acceptEdits|auto|bypassPermissions).
+const (
+	PermissionDefault           PermissionMode = "default"
+	PermissionAcceptEdits       PermissionMode = "accept-edits"
+	PermissionAuto              PermissionMode = "auto"
+	PermissionBypassPermissions PermissionMode = "bypass-permissions"
+)
+
+// AgentConfig mirrors domain.AgentConfig, the typed per-project agent config
+// {model, permissions}. Source: backend/internal/domain/agentconfig.go:23-31.
+//
+// Fields this client does not model are captured on decode and re-emitted on
+// encode (extra), so a GET → mutate → PUT round-trip against a newer daemon
+// does not drop settings — required because PUT replaces the config wholesale
+// (see UpdateProjectConfig).
+type AgentConfig struct {
+	// Model overrides the agent's default model (e.g. claude-opus-4-5).
+	Model string
+	// Permissions sets the agent's starting permission mode; empty means the
+	// adapter's default.
+	Permissions PermissionMode
+
+	extra map[string]json.RawMessage
+}
+
+// IsZero reports whether the config carries no settings (AO treats that as
+// unset; domain/agentconfig.go:34-37).
+func (c AgentConfig) IsZero() bool {
+	return c.Model == "" && c.Permissions == "" && len(c.extra) == 0
+}
+
+// UnmarshalJSON decodes the typed fields and keeps unknown keys for round-trip.
+func (c *AgentConfig) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*c = AgentConfig{}
+	for k, v := range raw {
+		switch k {
+		case "model":
+			if err := json.Unmarshal(v, &c.Model); err != nil {
+				return err
+			}
+		case "permissions":
+			if err := json.Unmarshal(v, &c.Permissions); err != nil {
+				return err
+			}
+		default:
+			if c.extra == nil {
+				c.extra = map[string]json.RawMessage{}
+			}
+			c.extra[k] = v
+		}
+	}
+	return nil
+}
+
+// MarshalJSON emits set typed fields plus preserved unknown keys, matching the
+// daemon's omitempty wire shape (domain/agentconfig.go:26-30).
+func (c AgentConfig) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(c.extra)+2)
+	for k, v := range c.extra {
+		out[k] = v
+	}
+	if c.Model != "" {
+		out["model"], _ = json.Marshal(c.Model)
+	}
+	if c.Permissions != "" {
+		out["permissions"], _ = json.Marshal(c.Permissions)
+	}
+	return json.Marshal(out)
+}
+
+// ProjectConfig mirrors domain.ProjectConfig, the per-project config blob
+// stored by AO (backend/internal/domain/projectconfig.go:20-58). Only
+// AgentConfig is typed here (Overmind's sole concern); every other field
+// (defaultBranch, sessionPrefix, env, symlinks, postCreate, agentRules,
+// worker/orchestrator overrides, reviewers, trackerIntake, …) is preserved
+// verbatim in extra across decode/encode. That preservation is mandatory:
+// PUT /projects/{id}/config REPLACES the stored config wholesale (see
+// UpdateProjectConfig), so dropping a field here would erase it in AO.
+type ProjectConfig struct {
+	// AgentConfig is the project's default agent config
+	// (domain/projectconfig.go:43-44, json key "agentConfig").
+	AgentConfig AgentConfig
+
+	extra map[string]json.RawMessage
+}
+
+// IsZero reports whether the config carries no settings. PUTting a zero config
+// clears the project's stored config (service/project/dto.go:31-32).
+func (c ProjectConfig) IsZero() bool {
+	return c.AgentConfig.IsZero() && len(c.extra) == 0
+}
+
+// UnmarshalJSON decodes agentConfig typed and keeps all other keys verbatim.
+func (c *ProjectConfig) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*c = ProjectConfig{}
+	for k, v := range raw {
+		if k == "agentConfig" {
+			if err := json.Unmarshal(v, &c.AgentConfig); err != nil {
+				return err
+			}
+			continue
+		}
+		if c.extra == nil {
+			c.extra = map[string]json.RawMessage{}
+		}
+		c.extra[k] = v
+	}
+	return nil
+}
+
+// MarshalJSON emits preserved keys plus agentConfig when set.
+func (c ProjectConfig) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(c.extra)+1)
+	for k, v := range c.extra {
+		out[k] = v
+	}
+	if !c.AgentConfig.IsZero() {
+		enc, err := json.Marshal(c.AgentConfig)
+		if err != nil {
+			return nil, err
+		}
+		out["agentConfig"] = enc
+	}
+	return json.Marshal(out)
 }
 
 // AgentInfo is the user-facing identity of one agent adapter.
