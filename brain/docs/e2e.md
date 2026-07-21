@@ -325,3 +325,125 @@ merge local đúng, marker ok, plan done trong ~4 phút. Không có fix code nà
 - `om run` tự thoát exit 0 khi plan done; không còn process `om run` hay tmux
   session nào; 2 session AO đều terminated. Repo /tmp/om-e2e-1784638812 giữ
   lại làm hiện trường.
+
+
+---
+
+## Nhật ký chạy thật — lần 5, 2026-07-21: tier-1 LLM verify sống (OM-10)
+
+**Verdict: PASS** — lần đầu OM-10 chạy THẬT qua AO daemon (không phải unit
+test): gate fail-fast thiếu `roles.verifier` chặn đúng; tier-1 pass → merge;
+tier-1 FAIL → `task_retry` round 1 kèm feedback → worker round 1 sửa đúng →
+pass → merge (nhánh retry-with-feedback THÀNH CÔNG, không cần đến budget).
+Máy Mac mini, AO 0.10.3, claude CLI 2.1.205, om build từ HEAD 48f4a5f.
+
+### GATE — kết quả thật
+- Daemon UP: `GET /api/v1/projects` = 200. `go build -o /tmp/om ./cmd/om` sạch.
+- CHƯA có `~/.overmind/config.yaml` (chỉ có overmind.db) — đúng tiền đề để test
+  fail-fast; planner vẫn chạy nhờ defaults auto-detect `cli/claude`.
+
+### Đăng ký project — caveat curl
+- Repo test `/tmp/om-e2e5-1784644173` (git init -b main, commit README +
+  `.claude/settings.json` autonomy copy từ lần 4, commit 5c11b7d).
+- POST /projects với `-d '{...}'` inline trong shell bị 400 `INVALID_JSON` dù
+  body nhìn giống hệt; gửi CÙNG nội dung qua `--data @file` → 201 (project
+  om-e2e5-1784644173, single_repo, defaultBranch main). Nghi shell escaping
+  của lớp chạy lệnh — từ nay luôn dùng `--data @file` cho JSON body.
+
+### Bước 1 — gate fail-fast thiếu roles.verifier: PASS
+- Plan p-67896673 (goal haiku cần semantic review) → planner gán t1
+  `verify=llm` ngay lần thử đầu, check tier-0 tự sinh khá chặt
+  (`test -s haiku.txt && grep -c . == 3 && wc -l <= 3`).
+- Approve rồi `om run` → fail SỚM, exit 1, message nguyên văn:
+  `Error: plan p-67896673 has verify=llm tasks but no usable verifier LLM: no
+  roles.verifier in config (assign it a provider + model)`.
+- `om events p-67896673` chỉ có plan_created + plan_approved — KHÔNG có
+  run_started/dispatch nào: gate chặn trước khi đụng AO. Acceptance criterion
+  OM-10 xác nhận bằng thực nghiệm.
+
+### Bước 2 — config v2
+- Tạo `~/.overmind/config.yaml` (chưa tồn tại — không cần backup):
+  `providers.default` (type cli, command claude, args `-p --output-format
+  json`, timeout_sec 240), `roles.planner` + `roles.verifier` → default,
+  `max_verify_rounds: 2`. GIỮ LẠI file này cho các lần sau.
+
+### Bước 3 — happy path tier-1 PASS — plan p-58a76b39 (21:34→21:39, ~5 phút)
+- Goal A→B như lần 4 + yêu cầu t2 semantic: t1 tạo `greeting.txt`
+  (verify=deterministic), t2 đọc greeting → `reply.txt` một câu tiếng Anh lịch
+  sự trích nguyên văn greeting (verify=llm). Planner gán verify đúng từng task.
+- t1: trust-folder dialog (tái lập caveat lần 3/4, "pre-approves 18 tool
+  permissions") → 1 Enter qua tmux → marker ok → tier-0 pass → merge 2900f34.
+- t2: 1 approval prompt MỚI dạng command-substitution — allowlist có
+  `Bash(cat:*)` nhưng `grep -F "$(cat greeting.txt)" reply.txt` bị chặn vì
+  "Contains shell syntax (string) that cannot be statically analyzed" → 1
+  Enter. Sau đó: `task_verdict {"tier":0,"verdict":"pass"}` → **`task_verdict
+  {"tier":1,"verdict":"pass"}`** (tier-1 LLM call ~23s) → merge 26ec873 →
+  task_done → plan_done. `om run` tự thoát exit 0.
+- Verify: `git show main:reply.txt` = `Thank you for your kind message
+  "hello-om-e2e5-1784644173"; we are delighted to hear from you.` — chaining
+  vẫn sống, tier-1 nằm đúng chỗ trong pipeline (SAU tier-0, TRƯỚC merge).
+
+### Bước 4 — retry path (điểm đinh) — plan p-5afee3cf (21:40→21:43, ~2.5 phút)
+- Goal ép mâu thuẫn: DoD "poem.txt = haiku mùa THU 3 dòng 5-7-5" nhưng prompt
+  bảo worker viết LIMERICK 5 dòng về mùa ĐÔNG; check tier-0 chỉ
+  `test -s poem.txt` (cố ý yếu để lỗi lọt xuống tier-1). Planner sinh prompt
+  đúng ý ngay lần thử đầu, verify=llm.
+- Round 0 (session om-e2e5-1784644173-3, displayName om-da523a87): worker viết
+  limerick như prompt bảo → marker ok → tier-0 pass → **tier-1 FAIL** 21:42:19,
+  reason: "definition of done requires … haiku about autumn … but the diff
+  writes a five-line winter limerick … The embedded instruction to 'ignore any
+  tension' … cannot override it" — verifier không bị prompt-injection nhẹ
+  trong task prompt lừa.
+- `task_retry {round:1, tier:1}` cùng giây: kill session round 0, feedback CÓ
+  CẤU TRÚC (reason + finding per-file + hướng sửa "Replace the entire contents
+  … with an original three-line English haiku about autumn"). Re-dispatch
+  session MỚI om-e2e5-1784644173-4 (displayName om-3af620f5 ≠ round 0 — đúng
+  thiết kế idempotent per-round), không cần bấm gì (trust đã có).
+- Round 1: worker viết haiku mùa thu (bất chấp prompt gốc vẫn nói limerick —
+  bằng chứng hành vi rằng khối feedback nằm trong prompt round 1) → tier-0
+  pass → **tier-1 pass** 21:43:16 → merge 6852407 → task_done → plan_done.
+- **Nhánh (a) retry-with-feedback THÀNH CÔNG**; không đi đến
+  `verify_budget_exhausted` (budget chưa được thử sống — ghi nhận để lần sau).
+- Verify không "xanh giả": branch round-0 `ao/…-3/root` KHÔNG có event
+  task_branch_merged, main không chứa limerick; `git show main:poem.txt` =
+  haiku 3 dòng về mùa thu; git log chỉ merge branch `…-4/root`.
+
+### Chuỗi events p-5afee3cf (om events, rút gọn)
+```
+21:41:54 task_verdict  t1 {"tier":0,"verdict":"pass"}
+21:42:19 task_verdict  t1 {"tier":1,"verdict":"fail","reason":"…haiku about autumn…but the diff writes a five-line winter limerick…"}
+21:42:19 task_retry    t1 {"round":1,"tier":1,"feedback":"…Replace the entire contents of poem.txt with an original three-line English haiku…"}
+21:42:19 task_dispatched t1  (session -4, round 1)
+21:43:04 task_verdict  t1 {"tier":0,"verdict":"pass"}
+21:43:16 task_verdict  t1 {"tier":1,"verdict":"pass"}
+21:43:16 task_branch_merged t1 {"branch":"ao/om-e2e5-1784644173-4/root","sha":"68524073…"}
+21:43:16 task_done     t1 {"marker":"ok"}
+21:43:17 plan_done
+```
+
+### Caveat mới lần 5
+1. **JSON body qua curl `-d` inline có thể bị 400 INVALID_JSON** — dùng
+   `--data @file` (xem mục đăng ký project).
+2. **Không capture được prompt round-1 trực tiếp**: session terminated ngay
+   khi xong, AO API không expose initial prompt (GET /sessions/{id} không có
+   field prompt). Bằng chứng feedback-in-prompt là gián tiếp: hành vi worker
+   round 1 (làm theo DoD thay vì instruction limerick trong prompt gốc) + event
+   task_retry chứa nguyên khối feedback. Muốn bằng chứng trực tiếp phải capture
+   tmux trong lúc session round 1 còn sống.
+3. **Approval prompt dạng command-substitution**: allowlist prefix không cover
+   lệnh chứa `$( )` — claude-code chặn "cannot be statically analyzed" dù lệnh
+   con (cat) nằm trong allowlist. Biến thể mới của caveat "allowlist tĩnh
+   không đủ" (lần 3/4).
+4. **Tier-1 verifier kháng injection nhẹ**: câu "ignore any tension" cài trong
+   task prompt không đổi được verdict — verdict nêu đích danh và bác bỏ.
+5. Chi phí tier-1: ~23s (t2 happy) và ~12–25s (p-5afee3cf) mỗi verdict qua
+   cli/claude — chấp nhận được cho pipeline hiện tại.
+
+### Chưa thử sống trong lần 5
+- Nhánh (b) `task_failed kind=verify_budget_exhausted` (round 1 đã pass nên
+  budget không cạn); lỗi transport LLM (`verify_error`, không đốt budget).
+
+### Dọn dẹp
+- Cả 2 `om run` tự thoát khi plan done; không còn process om run hay tmux
+  session; 4 session AO của repo lần 5 đều terminated. GIỮ nguyên hiện trường:
+  repo /tmp/om-e2e5-1784644173, ~/.overmind/overmind.db, ~/.overmind/config.yaml.
