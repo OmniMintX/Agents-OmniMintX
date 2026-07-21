@@ -50,6 +50,11 @@ func (s *Scheduler) Run(ctx context.Context, planID string) error {
 	if err != nil {
 		return err
 	}
+	// Markers are untracked by protocol; excluding them repo-wide keeps
+	// planner checks like `git status --porcelain` from failing tier-0.
+	if err := sc.Git.EnsureExcluded(ctx, repo, DoneMarkerPrefix+"*"); err != nil {
+		return fmt.Errorf("exclude done markers in %s: %w", repo, err)
+	}
 	runID := newRunID()
 	if err := sc.St.StartRun(planID, runID); err != nil {
 		return err

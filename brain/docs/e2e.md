@@ -459,7 +459,8 @@ trust-folder dialog BIẾN MẤT (không cần `.claude/settings.json` nữa); d
 crash giữa run + resume adopt PASS. Nhưng cả 2 nấc autonomy đều còn cần bấm
 tay: `auto` bị classifier chặn cả `git add`/`git config`, `accept-edits` hỏi
 mọi bash compound. Bonus: lần đầu quan sát sống nhánh `verify_budget_exhausted`
-của OM-10 — do 1 bug mới phát hiện (planner check vs marker protocol, bên dưới).
+của OM-10 — do 1 bug OM thật tìm được nhờ E2E (planner check vs marker
+protocol, root cause + fix bên dưới).
 Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
 
 ### Setup — khác biệt then chốt so với lần 3–5
@@ -515,7 +516,9 @@ Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
 - Kết cục t1: agent dồn về 1 lệnh compound `git add && git -c … commit` → rơi
   xuống prompt hỏi tay → **1 lần bấm Enter**. t2 tương tự → **2 lần bấm**.
   Tổng plan 1: 2 event `task_needs_human`, **3 lần bấm tay**.
-- Pipeline sau đó chuẩn: tier-0 pass → merge → done cả 2 task, plan done.
+- Pipeline sau đó chuẩn: t1 tier-0 pass, system-commit không cần → merge
+  52c0243 (commit greeting.txt = 39addb5); t2 (session om-e2e6-1784648067-2)
+  commit 9900a8d "Add reply.txt quoting greeting" → merge 093da67 → plan DONE.
   Chaining verify: `git show main:greeting.txt` = `hello-om-e2e6-1784648067`;
   `main:reply.txt` = `Thank you for your kind message
   "hello-om-e2e6-1784648067"; it was a pleasure to receive it.` — TRÍCH đúng.
@@ -530,6 +533,9 @@ Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
   Compound READ-ONLY (`git status; echo; cat | od; git log`) thì chạy không
   hỏi; Write auto-approve. Tổng: 4 `task_needs_human`, **4 lần bấm** trong
   3 round của t1.
+- Cả 3 round t1 worker đều làm ĐÚNG việc + marker ok: round 0 (session -3)
+  commit d0ed3ce "Add greeting2.txt", round 1 (session -4) commit 878355f,
+  round 2 (session -5) commit 61ee168.
 - Plan fail KHÔNG phải do autonomy mà do bug mới (dưới): 3 round đều chết cùng
   một check tier-0 → `task_failed {"kind":"verify_budget_exhausted",
   "check_output":"greeting2.txt\n"}` → plan_failed. **Đây là lần đầu nhánh
@@ -537,19 +543,24 @@ Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
   đúng 2 retry, round 2 hết budget fail task, plan fail vì "no runnable tasks
   remain" — đúng thiết kế.
 
-### BUG MỚI (báo cáo, KHÔNG vá — ngoài scope OM-11): planner check vs marker protocol
-- Planner sinh check tier-0 cho t1: `test "$(cat greeting2.txt)" = "…" && git
-  ls-files --error-unmatch greeting2.txt && test -z "$(git status --porcelain)"`.
-- Nhưng OVERMIND PROTOCOL bắt worker để marker `.om-done.<hex8>` **uncommitted**
-  ở repo root → `git status --porcelain` trong worktree KHÔNG BAO GIỜ sạch →
-  check fail deterministic 100% mọi round, bất kể autonomy.
-- Scheduler đã biết exclude marker (`HasUncommitted(…, [DoneMarkerPrefix+"*"])`
-  trong poll.go) nhưng `runCheck` chạy nguyên văn lệnh planner sinh — planner
-  không biết về marker. Plan 1 thoát nạn vì check của nó tình cờ không đòi
+### BUG OM THẬT tìm được nhờ E2E — ĐÃ FIX: planner check vs marker protocol
+- ROOT CAUSE: planner sinh check tier-0 cho t1 `test "$(cat greeting2.txt)" =
+  "…" && git ls-files --error-unmatch greeting2.txt && test -z "$(git status
+  --porcelain)"`; nhưng tier-0 verify chạy check bằng `sh -c` NGAY TRONG
+  session worktree, nơi OVERMIND PROTOCOL bắt worker để marker
+  `.om-done.<hex8>` **untracked** (tạo, không commit) → `git status
+  --porcelain` KHÔNG BAO GIỜ sạch → check fail deterministic 100% mọi round,
+  dù worker làm đúng cả 3 round, bất kể autonomy.
+- System-commit đã exclude marker qua pathspec (`HasUncommitted(…,
+  [DoneMarkerPrefix+"*"])` trong poll.go) nhưng tier-0 check KHÔNG có
+  mitigation — `runCheck` chạy nguyên văn lệnh planner sinh, planner không
+  biết về marker. Plan 1 thoát nạn vì check của nó tình cờ không đòi
   porcelain sạch → bug NON-DETERMINISTIC theo từng plan.
-- Hướng sửa (cần task riêng): dạy planner (prompt) không sinh check đòi
-  worktree sạch, HOẶC runCheck xóa/stash marker trước khi chạy check, HOẶC
-  hậu xử lý check command. Quyết định thiết kế để coordinator chọn.
+- **Fix (đã validate live rồi implement)**: scheduler ghi pattern `.om-done.*`
+  vào `<repo>/.git/info/exclude` lúc run start — ghi ở git common dir nên áp
+  dụng cho MỌI linked worktree — qua `gitops.EnsureExcluded`, gọi trong
+  `Scheduler.Run` sau `resolveRepo`; kèm dặn planner (prompt) không sinh
+  check assert worktree sạch.
 
 ### So sánh 2 nấc + kết luận cho default
 | Nấc | needs_human | Bấm tay | Ghi chú |
@@ -564,6 +575,10 @@ Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
   thử lại khi backend ổn). Zero-touch thật chỉ kỳ vọng ở
   `bypass-permissions` — đã có sẵn trong OM-11 sau guard
   `autonomy_allow_bypass` + khuyến cáo sandbox; chưa demo sống (cần opt-in).
+- Kết luận OM-11c lần 6: zero-touch FAIL ở cả `auto` lẫn `accept-edits`
+  (Claude Code luôn hỏi với compound bash); tìm được + fix 1 bug thật
+  (marker × tier-0 clean-tree check). **Bước tiếp theo**: re-run với
+  `bypass-permissions` sau khi fix được build.
 
 ### Dọn dẹp
 - Cả 2 `om run` tự thoát khi plan xong (done/failed); không còn process om run

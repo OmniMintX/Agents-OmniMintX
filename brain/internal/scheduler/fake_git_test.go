@@ -114,3 +114,5 @@ func (g *fakeGit) HasRemoteBranch(_ context.Context, _, _ string) (bool, error) 
 	defer g.mu.Unlock()
 	return g.hasOrigin, nil
 }
+
+func (g *fakeGit) EnsureExcluded(_ context.Context, _, _ string) error { return nil }

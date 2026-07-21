@@ -75,7 +75,7 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 - **Wave 2**: OM-9 **DONE** — verify tầng 0 + merge pipeline + system-commit (commit f355bb5). OM-10 **DONE** — verifier LLM tầng 1 + retry budget (commit 45c6fa5 wave 1 store/config + verifier package; 76f74f4 wave 2 planner/scheduler; verifier độc lập approve cả 2 wave, confidence High).
 - **Wave 3**: OM-11 **code DONE** (0e1f417 aoclient config Get/Update + 6e241ce autonomy knob/ensureAutonomy; E2E lần 6) — **caveat: zero-touch CHƯA đạt**: classifier của nấc `auto` chặn cả lệnh vô hại (`git add`, `git config`) → vẫn cần bấm tay; `accept-edits` hỏi mọi bash compound. Cơ chế set permission PASS, trust-dialog đã biến mất; zero-touch thật chờ `bypass-permissions` (opt-in + sandbox) hoặc classifier cải thiện. OM-12 chưa bắt đầu.
 - **Wave 4** (OM-14) chưa bắt đầu.
-- **Bug mở (phát hiện E2E lần 6, chưa vá)**: planner sinh check tier-0 đòi `git status --porcelain` sạch, nhưng marker protocol bắt worker để `.om-done.<hex8>` uncommitted → check fail 100% mọi round → `verify_budget_exhausted` oan. Cần quyết định: sửa planner prompt, hoặc runCheck loại marker trước khi chạy. Chi tiết brain/docs/e2e.md lần 6.
+- **Bug phát hiện E2E lần 6 — ĐÃ vá**: planner sinh check tier-0 đòi `git status --porcelain` sạch, nhưng marker protocol bắt worker để `.om-done.<hex8>` uncommitted → check fail 100% mọi round → `verify_budget_exhausted` oan. Fix: `gitops.EnsureExcluded` ghi `.om-done.*` vào `<repo>/.git/info/exclude` lúc run start (gọi trong `Scheduler.Run` sau `resolveRepo`; git common dir → áp dụng mọi linked worktree), kèm dặn planner không sinh check assert worktree sạch. Bước tiếp theo OM-11c: re-run E2E với `bypass-permissions` sau khi fix được build. Chi tiết brain/docs/e2e.md lần 6.
 
 #### OM-11 — những gì đã hiện thực
 - **4 nấc autonomy** (config `autonomy`, env `OVERMIND_AUTONOMY`, override `om run --autonomy=…`): `auto` (mặc định) | `accept-edits` | `bypass-permissions` | `off` (không đụng project config).
@@ -227,4 +227,4 @@ git clone https://github.com/BloopAI/vibe-kanban.git
 
 ### 6. Workspace Intent
 - Spec + task notes Phase 2 nằm trong workspace agent-orchestrator — mở lại là có.
-- OM-10 (verifier LLM + retry budget) đã xong và merge (45c6fa5 + 76f74f4); OM-11 (autonomy, default `auto`) code xong (0e1f417 + 6e241ce); việc kế tiếp là OM-12 (approval gates) + bug planner-check-vs-marker (xem Trạng thái hiện tại).
+- OM-10 (verifier LLM + retry budget) đã xong và merge (45c6fa5 + 76f74f4); OM-11 (autonomy, default `auto`) code xong (0e1f417 + 6e241ce); bug planner-check-vs-marker đã vá (xem Trạng thái hiện tại); việc kế tiếp là OM-12 (approval gates) + re-run E2E autonomy với `bypass-permissions`.

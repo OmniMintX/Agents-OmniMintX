@@ -67,6 +67,7 @@ type LocalMerger interface {
 	HasUncommitted(ctx context.Context, dir string, exclude []string) (bool, error)
 	CommitWorktree(ctx context.Context, dir, msg string, exclude []string) (gitops.CommitResult, error)
 	DiffText(ctx context.Context, repo, base, branch string, maxBytes int) (string, error)
+	EnsureExcluded(ctx context.Context, repo, pattern string) error
 }
 
 // Verifier is the tier-1 LLM gate: it grades one finished task's diff
