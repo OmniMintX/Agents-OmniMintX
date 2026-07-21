@@ -83,3 +83,45 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 Hai chỗ dùng được:
 1. **Tầng quan sát/can thiệp `needs_human` (ngắn hạn)**: chạy worker session trong herdr thay tmux trần → thấy ngay agent nào blocked, attach từ xa để bấm trust-dialog/approval (pain point E2E lần 3). Dùng như tool ngoài → AGPL không ảnh hưởng. Caveat: cần kiểm chứng AO có cho cấu hình nơi chạy session; và OM-11 (PUT project config permissions) giải gốc rễ tốt hơn — herdr chỉ làm việc bấm tay dễ chịu hơn.
 2. **Ứng viên runtime thay AO (Phase 3+, dự phòng)**: socket API spawn/read/wait + session persistence là nền khả dĩ nếu muốn thoát AO 0.10.3 (MergePR stub, không API PR, thiếu route workspace/files). Chi phí: viết lại aoclient + tự quản worktree/branch — không đáng khi Phase 2 chưa xong.
+
+## Repo tham khảo cần bổ sung (khảo sát 2026-07-21)
+
+Bộ `docs/repo/` hiện tại (26 repo, gitignore — KHÔNG theo repo khi chuyển máy, clone lại theo danh sách này) thiên về multiplexer/kanban UI, thiếu 5 mảng. 14 ứng viên dưới đây đã xác minh sống bằng fetch trang GitHub (loại repo chết/archive), xếp hạng theo giá trị cho Overmind.
+
+### Đợt 1 — clone ngay, phục vụ Phase 2
+
+| Repo | Sao | Gap | Vì sao |
+|---|---|---|---|
+| [anthropic-experimental/sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ~4.7k | OM-11 | Sandbox chính chủ Anthropic cho Claude Code: Seatbelt (macOS) + bubblewrap/seccomp (Linux), proxy allowlist domain — cách chuẩn chạy `--dangerously-skip-permissions` an toàn, gọi được từ Go. Lưu ý org là `anthropic-experimental`, không phải `anthropics`. |
+| [qodo-ai/pr-agent](https://github.com/qodo-ai/pr-agent) | ~12.2k | OM-10 | Blueprint verifier LLM: nén diff + structured review; output `/improve` = payload feedback cho retry-with-feedback. |
+| [humanlayer/humanlayer](https://github.com/humanlayer/humanlayer) | ~11.1k | OM-12 | Go daemon (`hld`) quản Claude Code session + route tool-call approval cho người. Caveat: một phần deprecated chờ rebuild. |
+| [cschleiden/go-workflows](https://github.com/cschleiden/go-workflows) | ~511 | durability | Durable workflow engine nhúng, Go, backend SQLite, event-sourced history + deterministic replay — gần nhất với đúng thiết kế store của Overmind; tham chiếu số 1 cho schema/replay. |
+| [confident-ai/deepeval](https://github.com/confident-ai/deepeval) | ~17k | OM-10 | Primitives LLM-as-judge (G-Eval, rubric + threshold pass/fail) cho quyết định accept-or-retry của verifier. |
+
+### Đợt 2 — khi vào Phase 3 (merge queue / re-planning / budget)
+
+| Repo | Sao | Gap | Vì sao |
+|---|---|---|---|
+| [rust-lang/bors](https://github.com/rust-lang/bors) | ~165 | merge-queue | Merge queue production của rust-lang: serialize merge, test kết quả merge trước khi tiến main, rollup batching — lời giải cho diamond DAG. |
+| [SWE-bench/SWE-bench](https://github.com/SWE-bench/SWE-bench) | ~5.5k | OM-10 | Chuẩn mực test-based gating: apply diff trong container per-instance, chạy test suite thật → pass/fail. |
+| [dbos-inc/dbos-transact-golang](https://github.com/dbos-inc/dbos-transact-golang) | ~765 | durability | Step-checkpointing (resume từ step cuối) — mô hình crash-resume đơn giản hơn full replay để đối chiếu. |
+| [sentient-agi/ROMA](https://github.com/sentient-agi/ROMA) | ~5.1k | replanning | Atomizer/Planner/Aggregator/Verifier đệ quy — mẫu dynamic decomposition + re-plan giữa chừng. |
+| [riverqueue/river](https://github.com/riverqueue/river) | ~5.5k | durability | Pattern Go chuẩn enqueue-trong-transaction — khớp kỷ luật "1 transaction = event + cache" của store. |
+| [jj-vcs/jj](https://github.com/jj-vcs/jj) | ~30.5k | integration | Conflict là object first-class, auto-rebase descendants, operation log — tích hợp song song chịu conflict khi nhiều branch agent đổ về main. |
+| [maximhq/bifrost](https://github.com/maximhq/bifrost) | ~6.7k | budget | AI gateway Go với module governance: virtual keys, budget phân cấp, rate limit — tham chiếu budget/token per-task. |
+| [microsandbox/microsandbox](https://github.com/microsandbox/microsandbox) | ~7k | OM-11 | MicroVM self-hosted cho workload không tin cậy, có Go SDK — cô lập mạnh hơn container cho session không giám sát. |
+| [ServiceNow/TapeAgents](https://github.com/ServiceNow/TapeAgents) | ~318 | replanning | Toàn bộ session là "Tape" replayable, revise plan giữa chừng, resume từ bất kỳ điểm nào — cùng triết lý event-sourcing. |
+
+### Honorable mentions (đã xác minh, dưới ngưỡng)
+restatedev/restate (durable execution single-binary, Rust), RchGrav/claudebox (Docker harness cho Claude Code — OM-11), maragudk/goqite (SQLite queue tối giản), chdsbd/kodiak (auto-merge bot gọn — Phase 3 PR-flow), kubernetes-sigs/agent-sandbox + Zouuup/landrun (sandbox 2 đầu phổ nặng/nhẹ — OM-11), kodus-ai (review rules ngôn ngữ tự nhiên → gợi ý acceptance criteria per-task).
+
+Lưu ý: **mergiraf** (merge cấu trúc syntax-aware) khớp gap integration nhưng ở Codeberg, chưa xác minh — xem tay. Các repo đã loại vì chết/archive: textcortex/claude-code-sandbox, lmnr-ai/flow, marge-bot, bors-ng, Agentless, mergify-engine (đóng nguồn).
+
+### Lệnh clone (chạy trên máy mới, trong `docs/repo/`)
+```sh
+cd docs/repo
+# Đợt 1
+for r in anthropic-experimental/sandbox-runtime qodo-ai/pr-agent humanlayer/humanlayer cschleiden/go-workflows confident-ai/deepeval; do git clone --depth 1 "https://github.com/$r.git"; done
+# Đợt 2 (khi vào Phase 3)
+for r in rust-lang/bors SWE-bench/SWE-bench dbos-inc/dbos-transact-golang sentient-agi/ROMA riverqueue/river jj-vcs/jj maximhq/bifrost microsandbox/microsandbox ServiceNow/TapeAgents; do git clone --depth 1 "https://github.com/$r.git"; done
+```
