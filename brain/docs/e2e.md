@@ -453,15 +453,19 @@ Máy Mac mini, AO 0.10.3, claude CLI 2.1.205, om build từ HEAD 48f4a5f.
 
 ## Nhật ký chạy thật — lần 6, 2026-07-21: autonomy modes (OM-11)
 
-**Verdict: cơ chế OM-11 PASS, mục tiêu zero-touch KHÔNG đạt.** ensureAutonomy
-hoạt động đúng cả 3 đường (unset→auto, idempotent, override CLI auto→accept-edits);
+**Verdict: OM-11 PASS — zero-touch ĐẠT với `bypass-permissions` (run 3).**
+ensureAutonomy hoạt động đúng cả 4 đường (unset→auto, idempotent, override CLI
+auto→accept-edits, accept-edits→bypass-permissions);
 trust-folder dialog BIẾN MẤT (không cần `.claude/settings.json` nữa); daemon
-crash giữa run + resume adopt PASS. Nhưng cả 2 nấc autonomy đều còn cần bấm
-tay: `auto` bị classifier chặn cả `git add`/`git config`, `accept-edits` hỏi
-mọi bash compound. Bonus: lần đầu quan sát sống nhánh `verify_budget_exhausted`
-của OM-10 — do 1 bug OM thật tìm được nhờ E2E (planner check vs marker
-protocol, root cause + fix bên dưới).
-Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
+crash giữa run + resume adopt PASS. Hai nấc `auto`/`accept-edits` còn cần bấm
+tay (`auto` bị classifier chặn cả `git add`/`git config`, `accept-edits` hỏi
+mọi bash compound), nhưng run 3 với `bypass-permissions` (sau opt-in
+`autonomy_allow_bypass`) chạy 0 prompt. Bonus: lần đầu quan sát sống nhánh
+`verify_budget_exhausted` của OM-10 — do 1 bug OM thật tìm được nhờ E2E
+(planner check vs marker protocol, root cause + fix bên dưới, fix validate
+sống ở run 3).
+Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b);
+run 3 dùng /tmp/om build lại kèm fix EnsureExcluded.
 
 ### Setup — khác biệt then chốt so với lần 3–5
 - Repo test `/tmp/om-e2e6-1784648067`: commit đầu CHỈ có README —
@@ -562,26 +566,42 @@ Máy Mac mini, AO 0.10.3, om build từ HEAD 6e241ce (OM-11a 0e1f417 + OM-11b).
   `Scheduler.Run` sau `resolveRepo`; kèm dặn planner (prompt) không sinh
   check assert worktree sạch.
 
-### So sánh 2 nấc + kết luận cho default
+### Run 3 — nấc `bypass-permissions` (p-d29c03c4): ZERO-TOUCH PASS
+- Chạy ngay sau khi fix EnsureExcluded được build vào /tmp/om và bật
+  `autonomy_allow_bypass: true` trong ~/.overmind/config.yaml (opt-in guard).
+- Cùng repo test, goal tương tự (greeting3/reply3, 2 task chained),
+  `om run --autonomy=bypass-permissions`. Autonomy log:
+  `permissions accept-edits → bypass-permissions`.
+- **0 lần NEEDS HUMAN trong toàn bộ log, không một prompt nào — plan done
+  trong ~90 giây.**
+- t1 (session om-e2e6-1784648067-6, round 0): tier-0 verify pass ngay lần
+  đầu → merge 512fdce (commit greeting3.txt = 89ec310).
+- t2 (session om-e2e6-1784648067-7, round 0): tier-0 pass + tier-1 (LLM
+  verify) pass → merge a4f9e30 (commit reply3.txt = 3759e0c), nội dung quote
+  nguyên văn `hello3-om-e2e6-1784648067`.
+- `git status --porcelain` trên repo chính SẠCH sau run — marker bị exclude
+  bởi `.git/info/exclude`, fix EnsureExcluded hoạt động sống.
+
+### So sánh 3 nấc + kết luận cho default
 | Nấc | needs_human | Bấm tay | Ghi chú |
 |---|---|---|---|
 | `auto` (p-e817ba09) | 2 | 3 | Write auto-OK; classifier chặn cả `git add` đơn lẻ; nhiễu bởi outage backend classifier |
 | `accept-edits` (p-72724723) | 4 | 4 | Write auto-OK; MỌI bash compound (`&&`, `;`, `$( )`) đều hỏi; read-only compound thì không |
-- **Zero-touch chưa đạt ở cả 2 nấc** trên môi trường này. Acceptance
-  criterion "goal A→B chạy 0 lần bấm" của OM-11 FAIL về mặt demo (cơ chế set
-  permission thì PASS).
+| `bypass-permissions` (p-d29c03c4) | 0 | 0 | ZERO-TOUCH; cần opt-in `autonomy_allow_bypass`; plan done ~90s |
+- **Zero-touch chỉ đạt ở `bypass-permissions`**. Acceptance criterion
+  "goal A→B chạy 0 lần bấm" của OM-11 PASS về mặt demo với nấc này (cơ chế
+  set permission PASS cả 3 nấc).
 - Đề xuất: GIỮ default `auto` (ít prompt hơn, đỡ hơn accept-edits về bản chất
   vì classifier còn cải thiện theo model; outage hôm nay là confounder — đáng
-  thử lại khi backend ổn). Zero-touch thật chỉ kỳ vọng ở
-  `bypass-permissions` — đã có sẵn trong OM-11 sau guard
-  `autonomy_allow_bypass` + khuyến cáo sandbox; chưa demo sống (cần opt-in).
-- Kết luận OM-11c lần 6: zero-touch FAIL ở cả `auto` lẫn `accept-edits`
-  (Claude Code luôn hỏi với compound bash); tìm được + fix 1 bug thật
-  (marker × tier-0 clean-tree check). **Bước tiếp theo**: re-run với
-  `bypass-permissions` sau khi fix được build.
+  thử lại khi backend ổn). Unattended thật thì dùng `bypass-permissions`
+  sau opt-in `autonomy_allow_bypass` + khuyến cáo sandbox.
+- Kết luận OM-11c chốt: zero-touch ĐẠT ĐƯỢC với `bypass-permissions` (sau
+  opt-in `autonomy_allow_bypass`); `auto` và `accept-edits` KHÔNG zero-touch
+  được với Claude Code vì compound bash luôn prompt; bug marker × tier-0 đã
+  fix bằng `gitops.EnsureExcluded` (validate sống ở run 3).
 
 ### Dọn dẹp
-- Cả 2 `om run` tự thoát khi plan xong (done/failed); không còn process om run
-  hay tmux session om-e2e6; 5 session AO đều terminated. GIỮ hiện trường:
+- Cả 3 `om run` tự thoát khi plan xong (done/failed); không còn process om run
+  hay tmux session om-e2e6. GIỮ hiện trường:
   repo /tmp/om-e2e6-1784648067, logs /tmp/om-e2e6-run.log /tmp/om-e2e6-run2.log,
   ~/.overmind/overmind.db, ~/.overmind/config.yaml.
