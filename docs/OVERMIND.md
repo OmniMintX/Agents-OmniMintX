@@ -43,7 +43,7 @@ Quyết định nền (đã chốt):
 | 1 | `merge --abort` vô điều kiện có cửa sổ TOCTOU; 2 plan song song cùng repo có thể fail cứng vì index.lock | **Đã vá — OM-13, commit 8cfddb1** (guard abort bằng MERGE_HEAD==tip + lock per-repo) |
 | 2 | MaxBackoff (60s) == LockStaleAfter (60s) → outage dài có thể bị steal lock oan | **Đã vá — OM-13, commit 8cfddb1** (heartbeat trong backoff) |
 | 3 | taskClock in-memory reset khi resume | Chấp nhận Phase 1, đã doc |
-| 4 | Trust-folder dialog của `.claude/settings.json` cần 1 lần bấm tay ở session đầu | Chuyển Phase 2 (OM-11: AO project config permissions) |
+| 4 | Trust-folder dialog của `.claude/settings.json` cần 1 lần bấm tay ở session đầu | **Đã vá — OM-11** (autonomy qua AO project config, bỏ settings.json; E2E lần 6 xác nhận dialog biến mất) |
 
 ### Ranh giới Phase 1
 Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay từ precheck). Repo có remote + PR path để Phase 3+.
@@ -73,7 +73,15 @@ Chỉ hỗ trợ **repo remoteless** (có `origin/<default>` → fail-fast ngay 
 ### Trạng thái hiện tại (2026-07-21)
 - **Wave 1**: OM-13 **DONE** (commit 8cfddb1), OM-8 **DONE** — config v2 named providers + roles (commit 188025e).
 - **Wave 2**: OM-9 **DONE** — verify tầng 0 + merge pipeline + system-commit (commit f355bb5). OM-10 **DONE** — verifier LLM tầng 1 + retry budget (commit 45c6fa5 wave 1 store/config + verifier package; 76f74f4 wave 2 planner/scheduler; verifier độc lập approve cả 2 wave, confidence High).
-- **Wave 3** (OM-11, OM-12) và Wave 4 (OM-14) chưa bắt đầu.
+- **Wave 3**: OM-11 **code DONE** (0e1f417 aoclient config Get/Update + 6e241ce autonomy knob/ensureAutonomy; E2E lần 6) — **caveat: zero-touch CHƯA đạt**: classifier của nấc `auto` chặn cả lệnh vô hại (`git add`, `git config`) → vẫn cần bấm tay; `accept-edits` hỏi mọi bash compound. Cơ chế set permission PASS, trust-dialog đã biến mất; zero-touch thật chờ `bypass-permissions` (opt-in + sandbox) hoặc classifier cải thiện. OM-12 chưa bắt đầu.
+- **Wave 4** (OM-14) chưa bắt đầu.
+- **Bug mở (phát hiện E2E lần 6, chưa vá)**: planner sinh check tier-0 đòi `git status --porcelain` sạch, nhưng marker protocol bắt worker để `.om-done.<hex8>` uncommitted → check fail 100% mọi round → `verify_budget_exhausted` oan. Cần quyết định: sửa planner prompt, hoặc runCheck loại marker trước khi chạy. Chi tiết brain/docs/e2e.md lần 6.
+
+#### OM-11 — những gì đã hiện thực
+- **4 nấc autonomy** (config `autonomy`, env `OVERMIND_AUTONOMY`, override `om run --autonomy=…`): `auto` (mặc định) | `accept-edits` | `bypass-permissions` | `off` (không đụng project config).
+- **ensureAutonomy trong `om run` trước dispatch**: GET AO project config → set `agentConfig.permissions` → PUT (PUT là REPLACE toàn config nên round-trip lossless — giữ nguyên field khác); idempotent (đã đúng thì không PUT).
+- **Guard bypass**: `bypass-permissions` bị từ chối khi `autonomy_allow_bypass: false` (mặc định) — worker chạy không sandbox.
+- Thay thế hoàn toàn `.claude/settings.json` allowlist tĩnh (lần 3–5) — repo test lần 6 không có file này và không còn trust-folder dialog.
 
 #### OM-10 — những gì đã hiện thực
 - **Pipeline sau `ok:` marker**: `verify tầng 0 → system-commit → tầng 1 verifier LLM (chỉ task verify: llm) → local merge`. Tầng 1 chạy SAU system-commit để diff được chấm chứa cả công việc được rescue.
@@ -159,7 +167,7 @@ Kết quả nghiên cứu internet có kiểm chứng đối kháng (mỗi claim
 10. **3 cơ chế permission phân bậc cho headless `claude -p`** (high): (a) `--allowedTools` với prefix rule (`Bash(git diff *)`); (b) `acceptEdits` — auto-approve write + mkdir/touch/mv/cp, bash/network khác vẫn cần allow rule, **không có thì run non-interactive ABORT**; (c) `dontAsk` — deny-by-default cho CI khóa chặt. Abort-on-unapproved là failure mode cụ thể mà crash-resume của Overmind phải xử lý (scheduler sẽ thấy session chết không marker → hiện ra là `marker_missing`/`no_signal`). [headless](https://code.claude.com/docs/en/headless)
 
 ### Khuyến nghị rút ra cho Phase 2 (thứ tự hành động)
-- **OM-11**: chọn 2 nấc — mặc định `acceptEdits`/auto-mode qua AO project config (đã verify PUT hoạt động ở E2E lần 2); nấc full-auto (`bypass-permissions`) CHỈ khi session nằm trong sandbox-runtime/container, khóa `allowUnsandboxedCommands:false`, và hiểu giới hạn TLS/domain-fronting nếu bật network.
+- **OM-11**: chọn 2 nấc qua AO project config (đã verify PUT hoạt động ở E2E lần 2) — *hiện thực đã chốt default `auto`, `accept-edits` là nấc hạ*; nấc full-auto (`bypass-permissions`) CHỈ khi session nằm trong sandbox-runtime/container, khóa `allowUnsandboxedCommands:false`, và hiểu giới hạn TLS/domain-fronting nếu bật network.
 - **OM-10**: giữ tier 0 (test/check-based) làm cổng chính; verifier LLM prompt-based là tín hiệu bổ trợ, không phải cổng duy nhất — bằng chứng OpenHands cho thấy prompt-judge generalize kém.
 - **Phase 3 merge queue**: học Refinery của gastown (đã có source trong docs/repo/) — batch + test-merged-stack + bisect; đó là điều kiện mở diamond DAG.
 - **2 câu hỏi chưa có kết luận sống sót qua kiểm chứng** (cần nghiên cứu tiếp): re-planning/budget control giữa chừng, và postmortem thất bại công khai của các hệ orchestrator.
@@ -219,4 +227,4 @@ git clone https://github.com/BloopAI/vibe-kanban.git
 
 ### 6. Workspace Intent
 - Spec + task notes Phase 2 nằm trong workspace agent-orchestrator — mở lại là có.
-- OM-10 (verifier LLM + retry budget) đã xong và merge (45c6fa5 + 76f74f4); việc kế tiếp là Wave 3 (OM-11 autonomy, OM-12 approval gates).
+- OM-10 (verifier LLM + retry budget) đã xong và merge (45c6fa5 + 76f74f4); OM-11 (autonomy, default `auto`) code xong (0e1f417 + 6e241ce); việc kế tiếp là OM-12 (approval gates) + bug planner-check-vs-marker (xem Trạng thái hiện tại).
