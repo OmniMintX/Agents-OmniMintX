@@ -134,4 +134,15 @@ func TestRunFailedDependencyBlocksChild(t *testing.T) {
 	if !cascaded {
 		t.Fatal("child task_failed must have kind=dependency_failed naming the failed dep")
 	}
+	// OM-12d: the cascade is a direct pending->failed — the child never
+	// dispatched, so it must have NO task_dispatching event.
+	events, err := st.ListEvents("plan-1")
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, e := range events {
+		if e.Type == store.EventTaskDispatching && e.TaskID != nil && *e.TaskID == "b1234567" {
+			t.Fatal("cascaded child b1234567 must not have a synthetic task_dispatching event")
+		}
+	}
 }

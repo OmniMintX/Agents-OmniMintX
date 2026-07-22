@@ -254,13 +254,17 @@ func editPlan(plan *planner.Plan, harnesses []string) (*planner.Plan, error) {
 func printPlanTable(planID, goal string, tasks []planner.Task) {
 	fmt.Printf("\nPlan %s — %s\n\n", planID, goal)
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTITLE\tHARNESS\tDEPENDS ON\tPROMPT")
+	fmt.Fprintln(w, "ID\tTITLE\tHARNESS\tDEPENDS ON\tAPPROVAL\tPROMPT")
 	for _, t := range tasks {
 		deps := "-"
 		if len(t.DependsOn) > 0 {
 			deps = strings.Join(t.DependsOn, ",")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d chars\n", t.ID, t.Title, t.Harness, deps, len(t.Prompt))
+		approval := "-"
+		if t.RequiresApproval {
+			approval = "yes"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d chars\n", t.ID, t.Title, t.Harness, deps, approval, len(t.Prompt))
 	}
 	w.Flush()
 }

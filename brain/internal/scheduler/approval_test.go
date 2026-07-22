@@ -173,11 +173,12 @@ func TestRunApprovalPermanentAcrossRetries(t *testing.T) {
 	}
 }
 
-// TestRunRejectFailsTaskAndCascades: an `om reject-task` (FailTask with
-// kind=rejected, simulated between ticks) must terminate the gated task,
-// cascade dependency_failed onto its pending dependent, and fail the plan
-// with both listed in failed_tasks — while an independent branch still
-// runs to done.
+// TestRunRejectFailsTaskAndCascades: an `om reject-task` (RejectTask,
+// simulated between ticks) must terminate the gated task, cascade
+// dependency_failed onto its pending dependent, and fail the plan with
+// both listed in failed_tasks — while an independent branch still runs to
+// done. Neither the rejected task nor the cascaded dependent ever
+// dispatches, so NEITHER may have a task_dispatching event.
 func TestRunRejectFailsTaskAndCascades(t *testing.T) {
 	st, ao, s := newHarness(t, []store.NewTask{
 		ntGated("a1234567"), nt("b1234567", "a1234567"), nt("c1234567"),
@@ -191,7 +192,7 @@ func TestRunRejectFailsTaskAndCascades(t *testing.T) {
 		if ds.TaskStatus["a1234567"] != store.TaskAwaitingApproval {
 			return
 		}
-		if err := st.FailTask("plan-1", "a1234567", ds.LastRunID, `{"kind":"rejected","reason":"nope"}`); err != nil {
+		if err := st.RejectTask("plan-1", "a1234567", ds.LastRunID, `{"kind":"rejected","reason":"nope"}`); err != nil {
 			t.Fatalf("reject: %v", err)
 		}
 	})
@@ -222,6 +223,17 @@ func TestRunRejectFailsTaskAndCascades(t *testing.T) {
 			if !strings.Contains(p, want) {
 				t.Fatalf("plan_failed payload missing %s: %s", want, p)
 			}
+		}
+	}
+	// Clean cascade: no synthetic task_dispatching for tasks that never
+	// dispatched (a was rejected at the gate, b failed pending->failed).
+	events, err := st.ListEvents("plan-1")
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, e := range events {
+		if e.Type == store.EventTaskDispatching && e.TaskID != nil && *e.TaskID != "c1234567" {
+			t.Fatalf("task %s never dispatched but has a task_dispatching event", *e.TaskID)
 		}
 	}
 }

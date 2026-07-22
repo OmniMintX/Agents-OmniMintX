@@ -173,3 +173,42 @@ func TestRejectTaskErrors(t *testing.T) {
 		t.Errorf("rejecting a pending task: want status error, got %v", err)
 	}
 }
+
+// TestRejectTaskLosesRaceToApproveDispatch: the scheduler approves and
+// dispatches the task between the CLI's PlanState read and the reject
+// write (the OM-12 TOCTOU). RejectTask's in-transaction guard must refuse
+// with the ACTUAL status — no task_failed event, no orphaned AO session.
+func TestRejectTaskLosesRaceToApproveDispatch(t *testing.T) {
+	cfg := gatedPlanConfig(t, "t1")
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.ApproveTask("plan-1", "t1", "run-1"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := st.MarkTaskDispatching("plan-1", "t1", "run-1"); err != nil {
+		t.Fatalf("mark dispatching: %v", err)
+	}
+	if err := st.DispatchTask("plan-1", "t1", "run-1", "sess-1", "branch-1"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	err = runRejectTask(cfg, "plan-1", "t1", "changed my mind")
+	if err == nil || !strings.Contains(err.Error(), "cannot reject") ||
+		!strings.Contains(err.Error(), store.TaskDispatched) {
+		t.Fatalf("want cannot-reject error naming status %q, got %v", store.TaskDispatched, err)
+	}
+	if got := planTaskStatus(t, cfg, "t1"); got != store.TaskDispatched {
+		t.Fatalf("t1 = %s, want dispatched (session must not be orphaned)", got)
+	}
+	events, err := st.ListEvents("plan-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == store.EventTaskFailed {
+			t.Fatalf("lost reject race must append no task_failed event, got %s", e.PayloadJSON)
+		}
+	}
+}

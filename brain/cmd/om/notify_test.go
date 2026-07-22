@@ -45,6 +45,30 @@ func TestUserNotifierAutoDarwinOsascript(t *testing.T) {
 	}
 }
 
+// TestUserNotifierSanitizesControlChars: newlines/control chars in
+// title/body become spaces BEFORE the script is built (a raw newline is an
+// AppleScript syntax error → silent bell fallback), and the osascript path
+// is still taken.
+func TestUserNotifierSanitizesControlChars(t *testing.T) {
+	var got string
+	var log bytes.Buffer
+	n := &userNotifier{mode: config.NotifyAuto, logw: &log, goos: "darwin",
+		runScript: func(s string) error { got = s; return nil }}
+	n.Notify("multi\nline title", "body\twith\rcontrols\x07here")
+	if strings.ContainsAny(got, "\n\r\t\x07") {
+		t.Fatalf("script must contain no control characters, got %q", got)
+	}
+	if !strings.Contains(got, `with title "multi line title"`) {
+		t.Fatalf("newline must become a space in the title, got %q", got)
+	}
+	if !strings.Contains(got, `display notification "body with controls here"`) {
+		t.Fatalf("control chars must become spaces in the body, got %q", got)
+	}
+	if log.Len() != 0 {
+		t.Fatalf("sanitized notification must go via osascript, not the bell: %q", log.String())
+	}
+}
+
 func TestUserNotifierAutoFallsBackToBell(t *testing.T) {
 	var log bytes.Buffer
 	n := &userNotifier{mode: config.NotifyAuto, logw: &log, goos: "darwin",

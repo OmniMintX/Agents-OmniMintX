@@ -155,11 +155,11 @@ func (r *runner) dispatchReady(ctx context.Context, tasks []store.Task) error {
 // depends on a failed task with kind=dependency_failed: such a task can
 // never become ready, and failing it per-task (instead of leaving it
 // pending until the plan-level failure) surfaces WHY it will never run —
-// e.g. dependents of a rejected requires_approval task. It reuses the
-// merge-conflict mechanism: pending -> dispatching -> failed (FailTask has
-// no pending -> failed transition by design). Independent branches are
-// untouched. st.TaskStatus is updated in place so the caller sees the
-// cascade within the same tick.
+// e.g. dependents of a rejected requires_approval task. The transition is
+// a DIRECT pending -> failed (store.FailPendingTask): the task never
+// dispatches, so no synthetic task_dispatching intent pollutes the audit
+// log. Independent branches are untouched. st.TaskStatus is updated in
+// place so the caller sees the cascade within the same tick.
 func (r *runner) failBlockedDependents(tasks []store.Task, st *store.DerivedState) error {
 	for changed := true; changed; {
 		changed = false
@@ -177,13 +177,12 @@ func (r *runner) failBlockedDependents(tasks []store.Task, st *store.DerivedStat
 			if failedDep == "" {
 				continue
 			}
-			if err := r.St.MarkTaskDispatching(r.plan.ID, t.ID, r.runID); err != nil {
+			reason := fmt.Sprintf("dependency %s failed", failedDep)
+			payload := jsonPayload(map[string]any{"reason": reason, "kind": "dependency_failed"})
+			if err := r.St.FailPendingTask(r.plan.ID, t.ID, r.runID, payload); err != nil {
 				return err
 			}
-			if err := r.failTaskKind(t, "dependency_failed",
-				fmt.Sprintf("dependency %s failed", failedDep), "", nil); err != nil {
-				return err
-			}
+			r.logf("task %s: FAILED (dependency_failed): %s", t.ID, reason)
 			st.TaskStatus[t.ID] = store.TaskFailed
 			changed = true
 		}

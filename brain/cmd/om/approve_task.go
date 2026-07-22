@@ -60,8 +60,11 @@ func runApproveTask(cfg config.Config, planID, taskID string, all bool) error {
 }
 
 // runRejectTask is `om reject-task <plan-id> <task-id> [--reason]`: fail an
-// awaiting_approval task terminally (task_failed kind=rejected). The
-// scheduler then cascades dependency_failed onto its dependents.
+// awaiting_approval task terminally (task_failed kind=rejected). The status
+// guard lives INSIDE store.RejectTask's transaction, so a task the scheduler
+// approves+dispatches concurrently cannot be rejected (no TOCTOU between a
+// pre-check and the write). The scheduler then cascades dependency_failed
+// onto the rejected task's dependents.
 func runRejectTask(cfg config.Config, planID, taskID, reason string) error {
 	st, err := openStore(cfg)
 	if err != nil {
@@ -72,12 +75,6 @@ func runRejectTask(cfg config.Config, planID, taskID, reason string) error {
 	if err != nil {
 		return fmt.Errorf("plan %s not found: %w", planID, err)
 	}
-	if got := ds.TaskStatus[taskID]; got != store.TaskAwaitingApproval {
-		if got == "" {
-			return fmt.Errorf("task %s: not found in plan %s", taskID, planID)
-		}
-		return fmt.Errorf("task %s: cannot reject from status %q (only awaiting_approval tasks can be rejected)", taskID, got)
-	}
 	payload := map[string]any{"kind": "rejected"}
 	if reason != "" {
 		payload["reason"] = reason
@@ -86,7 +83,7 @@ func runRejectTask(cfg config.Config, planID, taskID, reason string) error {
 	if err != nil {
 		return err
 	}
-	if err := st.FailTask(planID, taskID, ds.LastRunID, string(enc)); err != nil {
+	if err := st.RejectTask(planID, taskID, ds.LastRunID, string(enc)); err != nil {
 		return err
 	}
 	fmt.Printf("Task %s rejected (terminal) — dependents will fail with dependency_failed.\n", taskID)

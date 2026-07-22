@@ -61,10 +61,24 @@ func (n *userNotifier) Notify(title, body string) {
 
 // notificationScript builds the AppleScript for a desktop notification,
 // escaping backslashes and double quotes so title/body cannot break out of
-// the string literals.
+// the string literals. Newlines and other control characters become spaces
+// first: a raw newline inside an AppleScript string literal is a syntax
+// error, which would silently drop every notification to the bell fallback.
 func notificationScript(title, body string) string {
 	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	return fmt.Sprintf(`display notification "%s" with title "%s"`, esc.Replace(body), esc.Replace(title))
+	return fmt.Sprintf(`display notification "%s" with title "%s"`,
+		esc.Replace(sanitizeNotifyText(body)), esc.Replace(sanitizeNotifyText(title)))
+}
+
+// sanitizeNotifyText replaces control characters (newlines, tabs, DEL, …)
+// with single spaces so they cannot break the AppleScript syntax.
+func sanitizeNotifyText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // runOsascript executes one AppleScript line via /usr/bin/osascript.
